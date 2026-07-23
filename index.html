@@ -563,15 +563,24 @@ td[ondblclick]:hover{background:rgba(255,159,10,.06)!important}
   </div>
 </div>
 
-<!-- ── CONFIG LOCALE · Palinurobar (isola a sé) ─────────────────────────────
-     Deve stare PRIMA di manager.js. Cambia SOLO l'identità del locale:
-     partizione dati, nome su stampe/PDF/email, prefisso SKU. Tutto il resto
-     (tema amber, layout, logica) resta identico a Osteria. -->
+<!-- ── CONFIG LOCALE · PALINUROBAR ──────────────────────────────────────────
+     Deve stare PRIMA di manager.js. È l'UNICO punto che distingue questo
+     locale dagli altri due: manager.js è identico byte per byte sui tre repo.
+     dbUser = partizione dati: sbagliarlo collega il locale ai dati di un altro. -->
 <script>
   window.CM_CONFIG = {
-    dbUser:     "palinurobar",   // partizione dati (user_id su tutte le tabelle)
-    nomeLocale: "Palinurobar",   // header stampe / email / PDF
-    skuPrefix:  "PB-"            // prefisso codice referenza
+    dbUser:              "palinurobar",
+    nomeLocale:          "Palinurobar",
+    skuPrefix:           "PB-",
+    lsPrefix:            "cm_",
+    theme:               "amber",
+    trasferimenti:       false,
+    servizioBottiglia:   6,
+    servizioDal:         "2026-07-01",
+    servizioIva:         10,
+    ivaSomministrazione: 10,
+    giorniApertura:      [1,2,3,4,5,6],
+    serviziGiorno:       {}
   };
 </script>
 <script src="manager.js"></script>
