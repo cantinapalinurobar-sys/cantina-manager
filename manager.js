@@ -613,6 +613,35 @@ function badge(t){return `<span class="badge badge-${t||'default'}">${h(t||'')}<
 // Rettifica giacenza: alza/abbassa la giacenza (segno +/−) SENZA impatto sul denaro
 // (non è né spesa né ricavo). "correzione" mantenuto come alias retro-compatibile.
 function _isRettifica(t){ return t==="rettifica"||t==="correzione"; }
+// ─── PROVENIENZA DEI CARICHI: INVENTARIO vs ACQUISTO ─────────────────────────
+// Regola operativa: un carico creato a mano dalla sezione Carico/Scarico è un
+// semplice ingresso in inventario — le bottiglie sono già in casa, non c'è
+// esborso. Un carico generato da un ordine ricevuto è un acquisto vero.
+// I movimenti creati dalla ricezione ordine portano origine:"ordine" + ordineId;
+// per lo storico precedente a questi campi si riconoscono dalla nota
+// "Da ordine …" o da una fattura riconducibile a un ordine (stessa euristica di
+// listCarichiSospetti). Attivo solo dove CONFIG.caricoManualeNonSpesa === true:
+// sugli altri locali il conteggio resta quello storico.
+// CONFIG.caricoInizialeFino ("YYYY-MM-DD") resta come rete di sicurezza: forza a
+// inventario tutti i carichi fino a quella data, qualunque sia la provenienza.
+const CARICO_MANUALE_NON_SPESA = CONFIG.caricoManualeNonSpesa === true;
+const CARICO_INIT_FINO = String(CONFIG.caricoInizialeFino||"").trim();
+function _daOrdine(m){
+  if(!m) return false;
+  if(m.origine==="ordine" || m.ordineId) return true;
+  const note=String(m.note??"").trim().toLowerCase();
+  if(note.startsWith("da ordine")) return true;
+  const kf=String(m.fattura??"").trim().toLowerCase();
+  if(!kf) return false;
+  return (orders||[]).some(o=>[o.numeroFattura,o.fattura].some(f=>String(f??"").trim().toLowerCase()===kf));
+}
+function _isCaricoIniziale(m){
+  if(!m || m.tipo!=="carico") return false;
+  if(m.inventarioIniziale===true) return true;
+  if(CARICO_INIT_FINO && (m.data||"") <= CARICO_INIT_FINO) return true;
+  return CARICO_MANUALE_NON_SPESA && !_daOrdine(m);
+}
+function _isAcquisto(m){ return !!m && !m.deleted && m.tipo==="carico" && !_isCaricoIniziale(m); }
 function _movVis(m){ const t=m&&m.tipo;
   if(t==="scarico") return {s:"-",i:"\u2b07",c:"#FF453A"};
   if(_isRettifica(t)) return {s:(m.segno==="-"?"-":"+"),i:"\u00b1",c:"#5AC8FA"};
@@ -2530,7 +2559,7 @@ function renderPlancia(){
   const tipoPie=TIPOLOGIE.filter(t=>_giacByTipo[t]>0).map(t=>({name:t,value:_giacByTipo[t]}));
 
   // ACQUISTI per periodo
-  const carichi=_mov.filter(m=>m.tipo==="carico");
+  const carichi=_mov.filter(_isAcquisto); // inventario di apertura escluso dagli acquisti
   function getAcquistiPerPeriodo(periodo){
     const buckets={};
     carichi.forEach(m=>{
@@ -2578,14 +2607,14 @@ function renderPlancia(){
   let costo30=0,ricavo30=0,cQ30=0,sQ30=0;
   movements.filter(m=>!m.deleted&&(m.data||"")>=_cut30).forEach(m=>{
     const w=wineMap[m.wineId]; const q=parseInt(m.qty)||0;
-    if(m.tipo==="carico"){ const p=costoCarico(m,w); const iva=(parseInt(w?.iva)||22)/100; costo30+=p*(1+iva)*q; cQ30+=q; }
+    if(m.tipo==="carico"){ if(_isCaricoIniziale(m)) return; const p=costoCarico(m,w); const iva=(parseInt(w?.iva)||22)/100; costo30+=p*(1+iva)*q; cQ30+=q; }
     else if(m.tipo==="scarico"){ ricavo30+=_pf(calcRicavoTotaleMovimento(m,w)); sQ30+=q; }
   });
   const netto30=ricavo30-costo30;
 
   // APPROVVIGIONAMENTO & FORNITORI (carichi ≥ 2026-01-01)
   const _fEpoch="2026-01-01";
-  const _fCarichi=movements.filter(m=>!m.deleted&&m.tipo==="carico"&&(m.data||"")>=_fEpoch);
+  const _fCarichi=movements.filter(m=>_isAcquisto(m)&&(m.data||"")>=_fEpoch);
   const _fAgg={};
   let _fTot=0,_fBt=0;
   let _fManqBt=0,_fManqRighe=0,_fManqImp=0;
@@ -2702,7 +2731,7 @@ function renderPlancia(){
     const k=(m.data||"").slice(0,7); if(!cashMap[k]) return;
     const w=wineMap[m.wineId];
     if(m.tipo==="scarico"&&w) cashMap[k].ricavo+=calcRicavoTotaleMovimento(m,w);
-    else if(m.tipo==="carico"){ const p=costoCarico(m,w); const iva=(parseInt(w?.iva)||22)/100; cashMap[k].spesa+=p*(1+iva)*m.qty; }
+    else if(m.tipo==="carico"&&!_isCaricoIniziale(m)){ const p=costoCarico(m,w); const iva=(parseInt(w?.iva)||22)/100; cashMap[k].spesa+=p*(1+iva)*m.qty; }
   });
   const cashData=Object.values(cashMap);
 
@@ -2903,7 +2932,7 @@ function renderPlancia(){
   // Acquisti per periodo (chart, splittato)
   html+=`<div class="card" style="padding:0;margin-bottom:20px">
     <div style="padding:12px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
-      <div style="display:flex;align-items:center;gap:6px"><span style="color:var(--amber3)">📦</span><span style="font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--txt2)">Acquisti per ${periodoLabels[analyticsAcquistiPeriodo]}</span></div>
+      <div style="display:flex;align-items:center;gap:6px"><span style="color:var(--amber3)">📦</span><span style="font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--txt2)">Acquisti per ${periodoLabels[analyticsAcquistiPeriodo]}</span>${(CARICO_MANUALE_NON_SPESA||CARICO_INIT_FINO)?`<span style="font-size:9px;color:var(--txt4);text-transform:none;letter-spacing:0"> \u00b7 solo carichi da ordine ricevuto</span>`:''}</div>
       <div style="display:flex;gap:4px">${["giorno","settimana","mese"].map(p=>`<button class="${analyticsAcquistiPeriodo===p?"btn-primary btn-sm":"btn-outline btn-sm"}" onclick="analyticsAcquistiPeriodo='${p}';render()">${periodoLabels[p]}</button>`).join("")}</div>
     </div>
     ${acquistiData.length===0?`<div style="padding:32px;text-align:center;color:var(--txt4);font-size:11px">Nessun carico registrato</div>`:`<div style="padding:20px"><div class="chart-container" style="height:200px"><canvas id="chart-acquisti"></canvas></div></div>`}
@@ -3812,7 +3841,7 @@ function renderMovimenti(){
         <thead><tr>${selMode==='movimenti'?`<th class="cb-col"><input type="checkbox" id="cb-sel-all" class="cb-sel" onchange="toggleSelAll()"></th>`:''}<th>Data</th><th>Tipo</th><th>Vino</th><th>Vitigni</th><th>Annata</th><th>Produttore</th><th>Nazione</th><th>N° Fattura</th><th>Fornitore</th><th class="r">Qtà</th><th class="r">P.Acq+IVA</th><th class="r">P.Carta/Ricavo</th><th>Note</th><th class="c"></th></tr></thead>
         <tbody>
           ${movements.length===0?`<tr><td colspan="10" style="text-align:center;padding:28px;color:var(--txt4)">Nessun movimento registrato</td></tr>`:
-          (()=>{ const wMap=Object.fromEntries(wines.map(w=>[w.id,w])); return movements.map(m=>{const wObj=wMap[m.wineId]; const wAnn=wObj?.annata||""; const costoIva=wObj?calcCostoIvaBottiglia(wObj):0; return `<tr data-sel-id="${m.id}">${selMode==='movimenti'?`<td class="cb-col"><input type="checkbox" class="cb-sel" data-id="${m.id}" onchange="toggleSel('${m.id}');_updateBulkBar()"></td>`:''}<td style="color:var(--txt2)">${h(_fmtDataIT(m.data))}</td><td><span style="font-size:9px;padding:2px 8px;border:1px solid;${m.tipo==="scarico"?"background:rgba(255,69,58,.12);color:#FF6B6B;border-color:#CC3025":_isRettifica(m.tipo)?"background:rgba(90,200,250,.12);color:#5AC8FA;border-color:#3a86a8":"background:rgba(20,83,45,.3);color:#30D158;border-color:#166534"}">${h((m.tipo||"").toUpperCase())}</span></td><td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${h(m.wineName)}</td><td style="color:var(--txt3);font-size:10px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${h(wObj?.vitigni||"—")}</td><td style="color:var(--amber);font-family:'Montserrat',sans-serif;white-space:nowrap">${wAnn?h(wAnn):'<span style="color:var(--txt4)">N.V.</span>'}</td><td style="color:var(--txt2);max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${h(m.produttore||"—")}</td><td style="color:var(--amber3);font-size:10px;white-space:nowrap">${h(m.nazione||wObj?.nazione||"—")}</td><td style="color:var(--txt3)">${h(m.fattura||"—")}</td><td style="color:var(--txt3)">${h(m.fornitore||"—")}</td><td class="r" style="font-family:'Montserrat',sans-serif;color:${_movVis(m).c};font-size:1rem">${_movVis(m).s}${m.qty}</td><td class="r" style="color:var(--txt3);white-space:nowrap">${costoIva?fmt(costoIva):"—"}</td><td class="r" style="color:var(--amber);white-space:nowrap">${wObj?.prezzoCarta?fmt(parseFloat(wObj.prezzoCarta)):"—"}</td><td style="color:var(--txt4);font-size:10px">${h(m.note||"—")}</td><td class="c"><button onclick="openMovModal('${m.id}')" style="background:none;border:1px solid var(--border2);color:var(--txt3);font-size:11px;padding:3px 8px;cursor:pointer;font-family:inherit;transition:all .15s" onmouseover="this.style.borderColor='var(--amber3)';this.style.color='var(--amber)'" onmouseout="this.style.borderColor='var(--border2)';this.style.color='var(--txt3)'">✏️</button></td></tr>`; }).join(""); })() }
+          (()=>{ const wMap=Object.fromEntries(wines.map(w=>[w.id,w])); return movements.map(m=>{const wObj=wMap[m.wineId]; const wAnn=wObj?.annata||""; const costoIva=wObj?calcCostoIvaBottiglia(wObj):0; return `<tr data-sel-id="${m.id}">${selMode==='movimenti'?`<td class="cb-col"><input type="checkbox" class="cb-sel" data-id="${m.id}" onchange="toggleSel('${m.id}');_updateBulkBar()"></td>`:''}<td style="color:var(--txt2)">${h(_fmtDataIT(m.data))}</td><td><span style="font-size:9px;padding:2px 8px;border:1px solid;${m.tipo==="scarico"?"background:rgba(255,69,58,.12);color:#FF6B6B;border-color:#CC3025":_isRettifica(m.tipo)?"background:rgba(90,200,250,.12);color:#5AC8FA;border-color:#3a86a8":"background:rgba(20,83,45,.3);color:#30D158;border-color:#166534"}">${h((m.tipo||"").toUpperCase())}${_isCaricoIniziale(m)?' \u00b7 INV.':''}</span></td><td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${h(m.wineName)}</td><td style="color:var(--txt3);font-size:10px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${h(wObj?.vitigni||"—")}</td><td style="color:var(--amber);font-family:'Montserrat',sans-serif;white-space:nowrap">${wAnn?h(wAnn):'<span style="color:var(--txt4)">N.V.</span>'}</td><td style="color:var(--txt2);max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${h(m.produttore||"—")}</td><td style="color:var(--amber3);font-size:10px;white-space:nowrap">${h(m.nazione||wObj?.nazione||"—")}</td><td style="color:var(--txt3)">${h(m.fattura||"—")}</td><td style="color:var(--txt3)">${h(m.fornitore||"—")}</td><td class="r" style="font-family:'Montserrat',sans-serif;color:${_movVis(m).c};font-size:1rem">${_movVis(m).s}${m.qty}</td><td class="r" style="color:var(--txt3);white-space:nowrap">${costoIva?fmt(costoIva):"—"}</td><td class="r" style="color:var(--amber);white-space:nowrap">${wObj?.prezzoCarta?fmt(parseFloat(wObj.prezzoCarta)):"—"}</td><td style="color:var(--txt4);font-size:10px">${h(m.note||"—")}</td><td class="c"><button onclick="openMovModal('${m.id}')" style="background:none;border:1px solid var(--border2);color:var(--txt3);font-size:11px;padding:3px 8px;cursor:pointer;font-family:inherit;transition:all .15s" onmouseover="this.style.borderColor='var(--amber3)';this.style.color='var(--amber)'" onmouseout="this.style.borderColor='var(--border2)';this.style.color='var(--txt3)'">✏️</button></td></tr>`; }).join(""); })() }
         </tbody>
       </table>
     </div>
@@ -4272,7 +4301,7 @@ function registraMovimento(){
   });
   // M7: snapshot del costo medio ponderato SOLO allo scarico (vendita). La rettifica non è vendita.
   const _costoSnap = tipo==="scarico" ? calcCostoIvaBottiglia(wine) : undefined;
-  const _movEntry = {id:uid(),wineId,wineName:wine.nome,produttore:wine.produttore,nazione:wine.nazione||"",tipo,qty:q,data,fattura,fornitore,note,ts:Date.now()};
+  const _movEntry = {id:uid(),wineId,wineName:wine.nome,produttore:wine.produttore,nazione:wine.nazione||"",tipo,qty:q,data,fattura,fornitore,note,origine:"manuale",ts:Date.now()};
   if(_isRettifica(tipo)) _movEntry.segno = segno;
   if(_costoSnap) _movEntry.costoUnitarioIva = _costoSnap;
   if(tipo==="scarico") _movEntry.servizio = parseFloat(CONFIG.servizioBottiglia)||0; // snapshot servizio
@@ -5607,6 +5636,7 @@ function confermaRicezioneOrdine(){
 
     movements.unshift({id:uid(),wineId:wine.id,wineName:wine.nome,produttore:wine.produttore,nazione:wine.nazione||"",
       tipo:"carico",qty:qtyArr,data:dataArrivo,fattura,prezzoAcqLotto:pAcq,
+      origine:"ordine",ordineId:ordine?.id||ricezioneModalData.ordineId||"",
       fornitore:fornitureName,note:"Da ordine "+ordine?.dataOrdine,ts:Date.now()});
 
     // Aggiorna qtyArr sulla referenza nell'ordine (oggetto ordine, mutazione locale accettabile)
@@ -5724,6 +5754,7 @@ function confermaRicezioneGlobale(){
 
       newMovsGlob.push({id:uid(),wineId:wine.id,wineName:wine.nome,produttore:wine.produttore,nazione:wine.nazione||"",
         tipo:"carico",qty,data:dataArrivo,fattura,prezzoAcqLotto:pAcq,
+        origine:"ordine",ordineId:ordine.id||"",
         fornitore:fornitureName,note:"Da ordine "+ordine.dataOrdine,ts:Date.now()});
       totRef++;
     });
@@ -5801,7 +5832,26 @@ function _mergeNonEmpty(base, over){
   }
   return out;
 }
-function _loadLocale(){ const _def={nome:"",indirizzo:"",cap:"",citta:"",provincia:"",piva:"",cf:"",sdi:"",pec:"",email:"",telefono:"",noteConsegna:""}; const _base=_mergeNonEmpty(_def, CONFIG.localeDefault); try{ const s=localStorage.getItem(_lsKey("locale")); return s?_mergeNonEmpty(_base, JSON.parse(s)):_base; }catch{ return _base; } }
+function _loadLocale(){
+  const _def={
+    nome:"", ragioneSociale:"",
+    indirizzo:"", cap:"", citta:"", provincia:"",                   // indirizzo di consegna
+    sedeIndirizzo:"", sedeCap:"", sedeCitta:"", sedeProvincia:"",   // sede legale
+    piva:"", cf:"", sdi:"", pec:"", email:"", telefono:"", noteConsegna:""
+  };
+  const _base=_mergeNonEmpty(_def, CONFIG.localeDefault);
+  try{ const s=localStorage.getItem(_lsKey("locale")); return s?_mergeNonEmpty(_base, JSON.parse(s)):_base; }catch{ return _base; }
+}
+// Sede legale assente ⇒ si ricade sull'indirizzo di consegna: i dati storici
+// (che avevano un solo indirizzo) continuano a stampare fatturazione corretta.
+function _fmtAddr(via,cap,citta,prov){
+  const l2=[cap,citta,prov?`(${prov})`:""].filter(Boolean).join(" ");
+  return [via,l2].filter(Boolean).join(", ");
+}
+function _addrConsegna(l){ l=l||localeData; return _fmtAddr(l.indirizzo,l.cap,l.citta,l.provincia); }
+function _addrSede(l){ l=l||localeData; return _fmtAddr(l.sedeIndirizzo,l.sedeCap,l.sedeCitta,l.sedeProvincia); }
+function _addrFatt(l){ return _addrSede(l)||_addrConsegna(l); }
+function _ragione(l){ l=l||localeData; return (l.ragioneSociale||"").trim()||l.nome||NOME_LOCALE; }
 function _saveLocaleLocal(d){ try{ localStorage.setItem(_lsKey("locale"),JSON.stringify(d)); }catch{} }
 let _localeBase = {}; // baseline per il merge campo-per-campo tra postazioni
 // I dati di fatturazione seguono il locale, non il browser: localStorage resta per
@@ -6015,10 +6065,10 @@ function stampaOrdine(id) {
   <div class="header">
     <div>
       <div class="brand">🍷 ${localeData.nome||NOME_LOCALE}</div>
-      <div class="brand-sub">${(()=>{const a=[localeData.indirizzo,[localeData.cap,localeData.citta,localeData.provincia?'('+localeData.provincia+')':''].filter(Boolean).join(' ')].filter(Boolean).join(', ');return a||'Gestione Cantina';})()}</div>
+      <div class="brand-sub">${(()=>{const r=_ragione(localeData),a=_addrFatt(localeData);const rs=(r&&r!==(localeData.nome||NOME_LOCALE))?r:'';return [rs,a].filter(Boolean).join(' — ')||'Gestione Cantina';})()}</div>
       ${localeData.piva?`<div style="font-size:9px;color:#888;margin-top:2px">P.IVA: ${localeData.piva}${localeData.cf?' &middot; C.F.: '+localeData.cf:''}</div>`:''}
       ${(localeData.email||localeData.telefono)?`<div style="font-size:9px;color:#888">${[localeData.email,localeData.telefono].filter(Boolean).join(' &middot; ')}</div>`:''}
-      ${localeData.noteConsegna?`<div style="font-size:9px;color:#888;margin-top:4px;max-width:280px"><strong>Consegna:</strong> ${localeData.noteConsegna}</div>`:''}
+      ${(()=>{const c=_addrConsegna(localeData);const b=[c,localeData.noteConsegna].filter(Boolean).join(' — ');return b?`<div style="font-size:9px;color:#888;margin-top:4px;max-width:280px"><strong>Consegna:</strong> ${b}</div>`:'';})()}
     </div>
     <div class="order-meta">
       <h2>Ordine Fornitore</h2>
@@ -6145,10 +6195,12 @@ async function emailOrdine(id) {
 
   const fornEmail=_getFornEmail(o.fornitore||"");
   const loc=_loadLocale();
-  const addrLine=[loc.cap,loc.citta,loc.provincia?"("+loc.provincia+")":""].filter(Boolean).join(" ");
+  const _sede=_addrSede(loc), _cons=_addrConsegna(loc);
   const mittente=[
-    loc.nome||NOME_LOCALE,
-    loc.indirizzo?(loc.indirizzo+(addrLine?" — "+addrLine:"")):"",
+    _ragione(loc),
+    (loc.nome && loc.nome!==_ragione(loc))?"Insegna: "+loc.nome:"",
+    (_sede||_cons)?"Sede legale: "+(_sede||_cons):"",
+    (_sede&&_cons&&_cons!==_sede)?"Indirizzo di consegna: "+_cons:"",
     loc.piva?"P.IVA: "+loc.piva:"",
     loc.cf?"C.F.: "+loc.cf:"",
     loc.sdi?"SDI: "+loc.sdi:"",
@@ -6156,7 +6208,9 @@ async function emailOrdine(id) {
     loc.email?"Email: "+loc.email:"",
     loc.telefono?"Tel: "+loc.telefono:""
   ].filter(Boolean).join("\n");
-  const consegnaBlock=loc.noteConsegna?"\n\n──────────────────────────────────\nINDICAZIONI CONSEGNA:\n"+loc.noteConsegna:"";
+  const consegnaBlock=(_cons||loc.noteConsegna)
+    ?"\n\n──────────────────────────────────\nINDICAZIONI CONSEGNA:\n"+[_cons,loc.noteConsegna].filter(Boolean).join("\n")
+    :"";
   const testoCompleto = decodeURIComponent(body)+consegnaBlock+"\n\n──────────────────────────────────\n"+mittente;
 
   // Versione compatta usata se il mailto completo supera il limite del browser
@@ -6220,7 +6274,7 @@ function whatsappOrdine(id) {
   }).join('\n');
 
   const mittente = [loc.nome||NOME_LOCALE, loc.telefono?'Tel: '+loc.telefono:''].filter(Boolean).join(' · ');
-  const consegna = loc.noteConsegna ? '\n\n📦 *Consegna:* '+loc.noteConsegna : '';
+  const consegna = (()=>{const c=_addrConsegna(loc);const b=[c,loc.noteConsegna].filter(Boolean).join(' — ');return b?'\n\n📦 *Consegna:* '+b:'';})();
   const totaleWa = hasAnyDiscount
     ? `*Lordo: ${fmt(totLordo)}* — sconti applicati → *Netto: ${fmt(totNetto)}* · ${totQty} bottiglie`
     : `*Totale: ${totQty} bottiglie*`;
@@ -6329,14 +6383,31 @@ function renderImpostazioni(){
     <div class="card">
       <div class="section-label"><span>🏠 Dati del Locale</span></div>
       <div class="form-grid g2">
-        <div class="col-span-2"><label class="form-label">Nome Locale</label><input class="form-input" id="loc-nome" value="${h(d.nome)}" placeholder="Palinurobar"></div>
+        <div><label class="form-label">Nome Locale <span style="color:var(--txt4);font-size:9px;text-transform:none;letter-spacing:0">— insegna</span></label><input class="form-input" id="loc-nome" value="${h(d.nome)}" placeholder="Palinurobar"></div>
+        <div><label class="form-label">Ragione Sociale</label><input class="form-input" id="loc-ragioneSociale" value="${h(d.ragioneSociale||'')}" placeholder="es. Palinuro S.r.l."></div>
+        <div><label class="form-label">Email locale</label><input class="form-input" id="loc-email" value="${h(d.email)}" placeholder="info@palinurobar.it"></div>
+        <div><label class="form-label">Telefono</label><input class="form-input" id="loc-telefono" value="${h(d.telefono)}" placeholder="+39 02 1234567"></div>
+      </div>
+
+      <div class="section-label" style="margin-top:20px"><span>🚚 Indirizzo di Consegna</span></div>
+      <div class="form-grid g2">
         <div class="col-span-2"><label class="form-label">Indirizzo</label><input class="form-input" id="loc-indirizzo" value="${h(d.indirizzo)}" placeholder="es. Via Roma 1"></div>
         <div><label class="form-label">CAP</label><input class="form-input" id="loc-cap" value="${h(d.cap)}" placeholder="20100"></div>
         <div><label class="form-label">Città</label><input class="form-input" id="loc-citta" value="${h(d.citta)}" placeholder="Milano"></div>
         <div><label class="form-label">Provincia</label><input class="form-input" id="loc-provincia" value="${h(d.provincia)}" placeholder="MI"></div>
-        <div><label class="form-label">Email locale</label><input class="form-input" id="loc-email" value="${h(d.email)}" placeholder="info@palinurobar.it"></div>
-        <div><label class="form-label">Telefono</label><input class="form-input" id="loc-telefono" value="${h(d.telefono)}" placeholder="+39 02 1234567"></div>
       </div>
+      <label class="form-label" style="margin-top:12px;display:block">Indicazioni Consegna</label>
+      <textarea class="form-input" id="loc-noteConsegna" rows="3" style="resize:vertical" placeholder="es. Consegnare martedì 8–12. Suonare citofono Cucina. Ingresso merci su Via Verdi.">${h(d.noteConsegna)}</textarea>
+
+      <div class="section-label" style="margin-top:20px"><span>🏛️ Sede Legale</span></div>
+      <p style="font-size:10px;color:var(--txt4);margin-bottom:8px">Se lasciata vuota, per la fatturazione viene usato l'indirizzo di consegna.</p>
+      <div class="form-grid g2">
+        <div class="col-span-2"><label class="form-label">Indirizzo</label><input class="form-input" id="loc-sedeIndirizzo" value="${h(d.sedeIndirizzo||'')}" placeholder="es. Via Verdi 10"></div>
+        <div><label class="form-label">CAP</label><input class="form-input" id="loc-sedeCap" value="${h(d.sedeCap||'')}" placeholder="20100"></div>
+        <div><label class="form-label">Città</label><input class="form-input" id="loc-sedeCitta" value="${h(d.sedeCitta||'')}" placeholder="Milano"></div>
+        <div><label class="form-label">Provincia</label><input class="form-input" id="loc-sedeProvincia" value="${h(d.sedeProvincia||'')}" placeholder="MI"></div>
+      </div>
+
       <div class="section-label" style="margin-top:20px"><span>🧾 Dati Fatturazione</span></div>
       <div class="form-grid g2">
         <div><label class="form-label">Partita IVA</label><input class="form-input" id="loc-piva" value="${h(d.piva)}" placeholder="IT12345678901"></div>
@@ -6344,8 +6415,6 @@ function renderImpostazioni(){
         <div><label class="form-label">Codice SDI <span style="color:var(--txt4);font-size:9px;text-transform:none;letter-spacing:0">— per fatture elettroniche</span></label><input class="form-input" id="loc-sdi" value="${h(d.sdi||'')}" placeholder="es. ABC1234"></div>
         <div><label class="form-label">PEC <span style="color:var(--txt4);font-size:9px;text-transform:none;letter-spacing:0">— alternativa a SDI</span></label><input class="form-input" id="loc-pec" value="${h(d.pec||'')}" placeholder="es. azienda@pec.it"></div>
       </div>
-      <div class="section-label" style="margin-top:20px"><span>🚚 Indicazioni Consegna</span></div>
-      <textarea class="form-input" id="loc-noteConsegna" rows="4" style="resize:vertical" placeholder="es. Consegnare martedì 8–12. Suonare citofono Cucina. Ingresso merci su Via Verdi.">${h(d.noteConsegna)}</textarea>
       <button class="btn-primary" style="margin-top:16px;width:100%;justify-content:center" onclick="salvaImpostazioni()">💾 Salva Impostazioni</button>
     </div>
     <div class="card">
@@ -6359,10 +6428,15 @@ function renderImpostazioni(){
 function salvaImpostazioni(){
   localeData={
     nome:(document.getElementById("loc-nome")?.value||"").trim()||NOME_LOCALE,
+    ragioneSociale:(document.getElementById("loc-ragioneSociale")?.value||"").trim(),
     indirizzo:(document.getElementById("loc-indirizzo")?.value||"").trim(),
     cap:(document.getElementById("loc-cap")?.value||"").trim(),
     citta:(document.getElementById("loc-citta")?.value||"").trim(),
     provincia:(document.getElementById("loc-provincia")?.value||"").trim(),
+    sedeIndirizzo:(document.getElementById("loc-sedeIndirizzo")?.value||"").trim(),
+    sedeCap:(document.getElementById("loc-sedeCap")?.value||"").trim(),
+    sedeCitta:(document.getElementById("loc-sedeCitta")?.value||"").trim(),
+    sedeProvincia:(document.getElementById("loc-sedeProvincia")?.value||"").trim(),
     piva:(document.getElementById("loc-piva")?.value||"").trim(),
     cf:(document.getElementById("loc-cf")?.value||"").trim(),
     sdi:(document.getElementById("loc-sdi")?.value||"").trim(),
@@ -6379,7 +6453,7 @@ function salvaImpostazioni(){
 function renderExport(){
   const dateStr=new Date().toLocaleDateString("it-IT");
   const wineMap=Object.fromEntries(wines.map(w=>[w.id,w]));
-  const carichi=movements.filter(m=>m.tipo==="carico");
+  const carichi=movements.filter(_isAcquisto); // inventario di apertura escluso
   let totImponibileAcq=0,totIvaAcq=0;
   carichi.forEach(m=>{const w=wineMap[m.wineId];const p=costoCarico(m,w);const imp=p*m.qty;totImponibileAcq+=imp;totIvaAcq+=imp*((parseInt(w?.iva)||22)/100);});
   let totPerdite=0,totIvaPerd=0;
@@ -10388,3 +10462,153 @@ function amExportCSV(){
   a.download = `scadenzario_${NOME_LOCALE.replace(/\s+/g,"_")}_${today()}.csv`;
   a.click(); URL.revokeObjectURL(a.href);
 }
+
+// ─── SUGGERIMENTI INLINE STILE T9 ─────────────────────────────────────────────
+// Completamento inline su tutti i campi testuali: mentre si digita, la parte
+// mancante della proposta compare già scritta e selezionata (grigio/ambra).
+// SPAZIO (o Tab / →) accetta, si continua a digitare per ignorarla, ESC/Backspace
+// la annulla. Delegato su document: funziona anche sui DOM rigenerati a ogni
+// render, senza toccare il markup esistente. Il vocabolario è quello dei
+// <datalist> già presenti, più i valori realmente inseriti (apprendimento
+// locale) e le sorgenti dichiarate con data-t9.
+(function(){
+  const T9_TYPES  = new Set(["text","search","url",""]);
+  const T9_MAX    = 400;                 // voci apprese per campo
+  const T9_MIN    = 2;                   // caratteri minimi prima di proporre
+  // Mitigazione mobile: le tastiere predittive Android/iOS gestiscono male la
+  // selezione programmatica (ghost cancellato, caratteri duplicati). Sotto
+  // pointer:coarse il motore resta spento; _t9Coarse è live, così un 2-in-1 che
+  // passa da tablet a laptop lo riattiva senza reload.
+  // CONFIG.t9Mobile === true forza l'attivazione anche su touch.
+  const _t9MQ = (window.matchMedia ? window.matchMedia("(pointer:coarse)") : null);
+  let   _t9Coarse = !!(_t9MQ && _t9MQ.matches);
+  if(_t9MQ){
+    const _upd = e => { _t9Coarse = e.matches; if(_t9Coarse) _t9Clear(); };
+    if(_t9MQ.addEventListener) _t9MQ.addEventListener("change", _upd);
+    else if(_t9MQ.addListener) _t9MQ.addListener(_upd);
+  }
+  const _t9Off = () => _t9Coarse && CONFIG.t9Mobile !== true;
+
+  let   _t9El     = null;                // campo con proposta attiva
+  let   _t9Typed  = "";                  // ciò che l'utente ha realmente scritto
+  let   _t9Busy   = false;
+
+  // Sorgenti extra: <input data-t9="produttori">
+  const T9_SRC = {
+    produttori:  ()=>wines.map(w=>w.produttore),
+    fornitori:   ()=>[...wines.map(w=>w.distributore), ...orders.map(o=>o.fornitore)],
+    vini:        ()=>wines.map(w=>w.nomeVino),
+    vitigni:     ()=>wines.flatMap(w=>String(w.vitigni||"").split(/[,;]/)),
+    tipologie:   ()=>TIPOLOGIE,
+    regioni:     ()=>wines.map(w=>w.regione),
+    nazioni:     ()=>wines.map(w=>w.nazione)
+  };
+
+  function _t9Key(el){ return el.getAttribute("list") || el.dataset.t9 || el.id || ""; }
+  function _t9Store(){ try{ return JSON.parse(localStorage.getItem(_lsKey("t9"))||"{}"); }catch{ return {}; } }
+  function _t9Learn(el, val){
+    const k=_t9Key(el), v=String(val||"").trim();
+    if(!k || v.length<T9_MIN) return;
+    const st=_t9Store(); const arr=st[k]||[];
+    const i=arr.findIndex(x=>x.toLowerCase()===v.toLowerCase());
+    if(i>=0) arr.splice(i,1);
+    arr.unshift(v);                       // più recente = più probabile
+    st[k]=arr.slice(0,T9_MAX);
+    try{ localStorage.setItem(_lsKey("t9"), JSON.stringify(st)); }catch{}
+  }
+
+  function _t9Field(el){
+    return !!el && el.tagName==="INPUT" && !el.readOnly && !el.disabled
+      && T9_TYPES.has((el.type||"").toLowerCase())
+      && el.id!=="auth-email" && el.id!=="auth-pw"
+      && el.dataset.t9!=="off"
+      && typeof el.setSelectionRange==="function";
+  }
+  // Il completamento inline si spegne su touch, l'apprendimento del vocabolario
+  // no: ciò che si digita da telefono resta disponibile come suggerimento su
+  // desktop (e viceversa).
+  function _t9Enabled(el){ return !_t9Off() && _t9Field(el); }
+
+  function _t9Vocab(el){
+    const out=[];
+    const lid=el.getAttribute("list");
+    if(lid){ const dl=document.getElementById(lid); if(dl) for(const o of dl.options) if(o.value) out.push(o.value); }
+    const src=el.dataset.t9 && T9_SRC[el.dataset.t9];
+    if(src){ try{ out.push(...src()); }catch{} }
+    const learned=_t9Store()[_t9Key(el)];
+    if(learned) out.push(...learned);
+    return out;
+  }
+
+  // Prefisso sull'intero valore o su una parola successiva ("cont" → "Giacomo
+  // Conterno"): stesso comportamento del completamento del telefono.
+  function _t9Match(el, typed){
+    const q=typed.toLowerCase();
+    let best=null, bestScore=1e9;
+    const seen=new Set();
+    for(const raw of _t9Vocab(el)){
+      const v=String(raw||"").trim(); if(!v) continue;
+      const lv=v.toLowerCase();
+      if(seen.has(lv)) continue; seen.add(lv);
+      if(lv===q || !lv.startsWith(q)) continue;
+      const score=v.length;               // completamento più corto = più probabile
+      if(score<bestScore){ bestScore=score; best=v; }
+    }
+    return best;
+  }
+
+  function _t9Clear(){ _t9El=null; _t9Typed=""; }
+
+  function _t9Fire(el){
+    _t9Busy=true;
+    el.dispatchEvent(new Event("input",{bubbles:true}));
+    el.dispatchEvent(new Event("change",{bubbles:true}));
+    _t9Busy=false;
+  }
+
+  // Proposta: solo mentre si aggiunge testo in coda (mai in cancellazione).
+  document.addEventListener("input", e=>{
+    const el=e.target;
+    if(_t9Busy || !_t9Enabled(el)) return;
+    if(e.isComposing || (e.inputType && e.inputType!=="insertText" && e.inputType!=="insertCompositionText")){ _t9Clear(); return; }
+    const typed=el.value;
+    if(typed.length<T9_MIN || el.selectionStart!==typed.length){ _t9Clear(); return; }
+    const m=_t9Match(el, typed);
+    if(!m){ _t9Clear(); return; }
+    el.value=typed.slice(0,typed.length)+m.slice(typed.length);
+    el.setSelectionRange(typed.length, m.length);
+    _t9El=el; _t9Typed=typed;
+  }, false); // bubble: gli handler oninput del campo vedono prima il testo digitato
+
+  document.addEventListener("keydown", e=>{
+    const el=e.target;
+    if(el!==_t9El) return;
+    const hasGhost = el.selectionStart===_t9Typed.length && el.selectionEnd===el.value.length && el.selectionEnd>el.selectionStart;
+    if(!hasGhost){ _t9Clear(); return; }
+    if(e.key===" "||e.key==="Spacebar"||e.key==="Tab"||e.key==="ArrowRight"||e.key==="Enter"){
+      if(e.key===" "||e.key==="Spacebar") e.preventDefault();   // lo spazio accetta, non si inserisce
+      const v=el.value;
+      el.setSelectionRange(v.length, v.length);
+      _t9Clear(); _t9Learn(el, v); _t9Fire(el);
+      return;
+    }
+    if(e.key==="Escape"||e.key==="Backspace"||e.key==="Delete"){
+      e.preventDefault();
+      el.value=_t9Typed;
+      el.setSelectionRange(_t9Typed.length,_t9Typed.length);
+      _t9Clear(); _t9Fire(el);
+    }
+  }, true);
+
+  document.addEventListener("blur", e=>{
+    const el=e.target;
+    if(!_t9Field(el)) return;
+    if(el===_t9El) _t9Clear();
+    _t9Learn(el, el.value);               // impara ciò che viene confermato
+  }, true);
+
+  // Evidenza della parte proposta: selezione ambra tenue, non "testo selezionato".
+  const st=document.createElement("style");
+  st.textContent=".form-input::selection{background:rgba(255,159,10,.30);color:inherit}.form-input::-moz-selection{background:rgba(255,159,10,.30);color:inherit}";
+  document.head.appendChild(st);
+})();
