@@ -1087,6 +1087,140 @@ async function _sbWriteVersion(v){
   }catch{}
 }
 
+// ─── SESSIONE CON SCADENZA ───────────────────────────────────────────────────
+// Un terminale lasciato aperto in sala per ore riprende con uno stato vecchio e,
+// al primo salvataggio, lo propaga. Dopo INATTIVITA_MAX si forza il ricaricamento:
+// la pagina riparte dal cloud e tutti i dispositivi convergono.
+var INATTIVITA_MAX_MS = 2*60*60*1000; // 2 ore
+let _lastActivity = Date.now(), _idleTimer = null;
+function _touchActivity(){ _lastActivity = Date.now(); }
+function _checkIdle(){
+  if(Date.now()-_lastActivity < INATTIVITA_MAX_MS) return;
+  // Non si ricarica con lavoro non salvato: prima si tenta il flush.
+  if(typeof _unsyncedMovCount==="function" && _unsyncedMovCount()>0){
+    try{ _flushSave(); }catch(e){}
+    _touchActivity(); // riprova al giro successivo
+    return;
+  }
+  location.reload();
+}
+function _initIdleWatch(){
+  ["click","keydown","touchstart","visibilitychange"].forEach(ev=>{
+    document.addEventListener(ev,()=>{
+      if(ev==="visibilitychange" && document.visibilityState==="visible"){
+        // Tornando in primo piano dopo molto tempo si rilegge subito il cloud.
+        if(Date.now()-_lastActivity >= INATTIVITA_MAX_MS){ location.reload(); return; }
+      }
+      _touchActivity();
+    },{passive:true});
+  });
+  if(_idleTimer) clearInterval(_idleTimer);
+  _idleTimer=setInterval(_checkIdle,60*1000);
+}
+
+// ─── GIACENZA DERIVATA DAL LEDGER (fonte unica) ──────────────────────────────
+// PROBLEMA STORICO: la giacenza viveva SOLO nel blob cm_wines. Con last-write-wins
+// un terminale rimasto aperto (o tornato online) risalvava il blob vecchio e le
+// bottiglie gia' scaricate "risuscitavano", mentre il ledger append-only aveva
+// gia' registrato lo scarico. Stesso meccanismo per gli ordini modificati e per
+// i trasferimenti gia' usciti ma ancora contati in casa.
+// SOLUZIONE: la giacenza NON e' piu' un numero che si salva e si sovrascrive, ma
+// il risultato di   seed + saldo_ledger.
+//   · saldo_ledger = somma dei movimenti di quella referenza (append-only, non
+//     torna mai indietro: un client vecchio non puo' cancellarne uno);
+//   · seed = giacenza precedente all'inizio del ledger, calcolata UNA VOLTA e
+//     poi congelata in w._giacSeed (serve per le referenze storiche, i cui
+//     carichi sono anteriori al ledger e quindi non sommabili).
+// Cosi' due terminali che divergono convergono sullo stesso numero, perche'
+// partono dagli stessi movimenti.
+function _ledgerDelta(m){
+  if(!m || m.deleted) return 0;
+  const q=parseInt(m.qty)||0;
+  switch(m.tipo){
+    case "carico": case "trasferimento-entrata": return q;
+    case "scarico": case "trasferimento-uscita": case "fallata": return -q;
+    case "rettifica": return q; // gia' firmata alla creazione
+    default: return 0;
+  }
+}
+function _saldoLedgerPerVino(){
+  const map=new Map();
+  (movements||[]).forEach(m=>{
+    if(!m || m.deleted || !m.wineId) return;
+    map.set(m.wineId,(map.get(m.wineId)||0)+_ledgerDelta(m));
+  });
+  // Le fallate NON sono movimenti: vivono nel proprio array e decrementano la
+  // giacenza al momento della registrazione. Senza contarle qui, la
+  // riconciliazione le farebbe "risorgere" a ogni giro.
+  (typeof fallate!=="undefined"?fallate:[]).forEach(f=>{
+    if(!f || f.deleted || !f.wineId) return;
+    map.set(f.wineId,(map.get(f.wineId)||0)-(parseInt(f.qty)||0));
+  });
+  return map;
+}
+// Referenze la cui storia nel ledger comincia dall'origine (c'e' almeno un
+// carico o un'entrata): per queste il seed DEVE essere 0, altrimenti dedurlo
+// dalla giacenza attuale cristallizzerebbe l'errore che stiamo correggendo
+// (es. bottiglie gia' trasferite ma ancora contate in casa).
+function _vinoConStoriaCompleta(){
+  const set=new Set();
+  (movements||[]).forEach(m=>{
+    if(!m || m.deleted || !m.wineId) return;
+    if(m.tipo==="carico"||m.tipo==="trasferimento-entrata") set.add(m.wineId);
+  });
+  return set;
+}
+// Riallinea i lotti alla giacenza ricalcolata, consumando in FIFO (o ripristinando
+// sull'ultimo lotto) cosi' l'invariante giacenza === Somma(lots.qtyRimanente) regge.
+function _riallineaLotti(w,giac){
+  const lots=(w.lots||[]).map(l=>({...l}));
+  if(!lots.length) return lots;
+  let somma=lots.reduce((a,l)=>a+(parseInt(l.qtyRimanente)||0),0);
+  let diff=giac-somma;
+  if(diff===0) return lots;
+  if(diff<0){ // consumo FIFO dal lotto piu' vecchio
+    let resto=-diff;
+    for(const l of lots){
+      if(resto<=0) break;
+      const d=Math.min(parseInt(l.qtyRimanente)||0,resto);
+      l.qtyRimanente=(parseInt(l.qtyRimanente)||0)-d; resto-=d;
+    }
+  } else { // rientro: si ripristina sull'ultimo lotto, senza superare il caricato
+    const l=lots[lots.length-1];
+    l.qtyRimanente=(parseInt(l.qtyRimanente)||0)+diff;
+  }
+  return lots;
+}
+// Ritorna {cambiate, dettaglio[]} per poter loggare cosa e' stato corretto.
+function _reconcileGiacenze(opts){
+  const silent=!!(opts&&opts.silent);
+  if(!_movV2Available) return {cambiate:0,dettaglio:[]}; // ledger inaffidabile: non si tocca nulla
+  const saldi=_saldoLedgerPerVino();
+  const completi=_vinoConStoriaCompleta();
+  const dett=[];
+  wines=(wines||[]).map(w=>{
+    const saldo=saldi.get(w.id)||0;
+    let seed=w._giacSeed;
+    if(completi.has(w.id)){
+      seed=0; // storia intera nel ledger: la giacenza e' tutta e sola somma dei movimenti
+    } else if(seed===undefined||seed===null||isNaN(parseInt(seed))){
+      // Referenza anteriore al ledger: si deduce il seed una volta sola, cosi'
+      // la giacenza pregressa non va persa.
+      seed=(parseInt(w.giacenza)||0)-saldo;
+    }
+    seed=parseInt(seed)||0;
+    const nuova=Math.max(0,seed+saldo);
+    const vecchia=parseInt(w.giacenza)||0;
+    if(nuova===vecchia && w._giacSeed!==undefined) return w;
+    if(nuova!==vecchia) dett.push({nome:w.nome,annata:w.annata,da:vecchia,a:nuova});
+    return {...w,_giacSeed:seed,giacenza:nuova,lots:_riallineaLotti(w,nuova)};
+  });
+  if(dett.length && !silent){
+    console.warn("[giacenze] riallineate dal ledger:",dett);
+  }
+  return {cambiate:dett.length,dettaglio:dett};
+}
+
 // ─── MOVIMENTI: LEDGER APPEND-ONLY (cm_movements_ledger) ─────────────────────────
 // I movimenti NON vivono più in un blob JSONB sovrascritto per intero (causa
 // storica di perdita scarichi: un client "indietro" riscriveva tutto l'array,
@@ -1566,6 +1700,9 @@ async function _rebaseOnRemote(){
     }
   }catch{}
   _localVersion  = rver ?? _localVersion;
+  // La giacenza si ricava dal ledger: un blob remoto piu' vecchio non puo' piu'
+  // far risorgere bottiglie gia' scaricate.
+  _reconcileGiacenze({silent:true});
   _lastGoodWines = _lastAttemptWines = _snapWines(remoteWines); // tripwire valutato contro il remoto vero
   _setMergeBase(remoteWines, ro ?? [], rf ?? [], rs ?? {});
   _saveLocalBackup();
@@ -1597,6 +1734,9 @@ async function _flushSave(){
 
   _saveInFlight = true;
   _savePending  = false;
+  // Ultimo presidio: qualunque cosa abbia toccato il blob in memoria, cio' che
+  // finisce sul cloud e' sempre la giacenza derivata dal ledger.
+  try{ _reconcileGiacenze({silent:true}); }catch(e){ console.warn("[giacenze] riconciliazione saltata:",e); }
   _setDbStatus("sync","Sincronizzazione…");
 
   // Cattura snapshot immutabile DEEP dello stato corrente prima dell'await.
@@ -1808,6 +1948,13 @@ async function loadData(){
 
     _migrateOrders();
     _migrateWines();
+    // Riconciliazione all'avvio: allinea le giacenze ai movimenti reali PRIMA di
+    // fissare la baseline, altrimenti si consoliderebbe uno stato gia' sbagliato.
+    const _rec=_reconcileGiacenze();
+    if(_rec.cambiate){
+      notify(`🔧 ${_rec.cambiate} giacenz${_rec.cambiate===1?"a riallineata":"e riallineate"} ai movimenti registrati`);
+      scheduleSave();
+    }
     _lastGoodWines = _lastAttemptWines = _snapWines(wines); // baseline integrità = stato remoto appena caricato
     _setMergeBase(wines, orders, fallate, alertSoglie); // baseline per il merge 3-vie
     await _syncLocale(); // dati di fatturazione dal cloud
@@ -2446,6 +2593,7 @@ function _setInvScrollHeight(){
 
 function afterRender(){
   _acInit();
+  if(!_idleTimer) _initIdleWatch();
   if(section==="dashboard") initPlanciaCharts();
   // Shortcut tooltip hints su bottoni topbar
   _applyShortcutTitles();
@@ -2795,8 +2943,36 @@ function _plServizi(daISO,aISO){
   const apert=new Set(CONFIG.giorniApertura||[0,1,2,3,4,5,6]);
   const extra=CONFIG.serviziGiorno||{};
   let n=0, d=_parseD(daISO); const fine=_parseD(aISO);
-  while(d<=fine){ const wd=d.getDay(); if(apert.has(wd)) n+=(parseInt(extra[wd])||1); d=_shiftD(d,1); }
+  while(d<=fine){ const wd=d.getDay();
+    if(apert.has(wd) && !_isChiuso(_isoD(d))) n+=(parseInt(extra[wd])||1);
+    d=_shiftD(d,1); }
   return n;
+}
+// Chiusure straordinarie (ferie, turni, festivi): giorni in cui il locale NON ha
+// lavorato. Senza, i periodi di ferie entravano nel denominatore dei KPI per
+// servizio e il calo sembrava una perdita di fatturato invece che una chiusura.
+// Formato in CM_CONFIG: chiusure:[{da:"2026-08-07",a:"2026-08-25",nota:"Ferie"}]
+function _isChiuso(dataISO){
+  const list=CONFIG.chiusure;
+  if(!Array.isArray(list)||!list.length) return false;
+  const g=String(dataISO).slice(0,10);
+  return list.some(c=>{ if(!c) return false;
+    const da=String(c.da||c.dal||"").slice(0,10), a=String(c.a||c.al||da).slice(0,10);
+    return da && g>=da && g<=a; });
+}
+function _giorniChiusi(daISO,aISO){
+  let n=0, d=_parseD(daISO); const fine=_parseD(aISO);
+  while(d<=fine){ if(_isChiuso(_isoD(d))) n++; d=_shiftD(d,1); }
+  return n;
+}
+function _notaChiusure(daISO,aISO){
+  const n=_giorniChiusi(daISO,aISO);
+  if(!n) return "";
+  const note=[...new Set((CONFIG.chiusure||[]).filter(c=>{
+    const da=String(c.da||c.dal||"").slice(0,10), a=String(c.a||c.al||da).slice(0,10);
+    return da<=String(aISO).slice(0,10) && a>=String(daISO).slice(0,10);
+  }).map(c=>c.nota||"chiusura"))].join(", ");
+  return `${n} giorn${n===1?"o":"i"} di chiusura esclus${n===1?"o":"i"}${note?" · "+note:""}`;
 }
 // Chiave di bucket per la granularità scelta (settimana = ISO 8601).
 function _plBucket(dataISO, gran){
@@ -2817,7 +2993,15 @@ function _plBucketLabel(key, gran){
 // Elenco ordinato dei bucket che coprono l'intervallo (anche quelli a zero).
 function _plBuckets(daISO,aISO,gran){
   const out=[], seen=new Set(); let d=_parseD(daISO); const fine=_parseD(aISO);
-  while(d<=fine){ const k=_plBucket(_isoD(d),gran); if(!seen.has(k)){ seen.add(k); out.push(k); } d=_shiftD(d,1); }
+  // I giorni di chiusura non generano bucket: sulla granularita' giornaliera
+  // producevano una lunga linea piatta a zero, indistinguibile da giorni aperti
+  // senza incasso. Su settimana/mese il bucket resta se almeno un giorno e'
+  // aperto, altrimenti sparisce.
+  while(d<=fine){
+    const g=_isoD(d);
+    if(!_isChiuso(g)){ const k=_plBucket(g,gran); if(!seen.has(k)){ seen.add(k); out.push(k); } }
+    d=_shiftD(d,1);
+  }
   return out;
 }
 // Delta % vs periodo precedente, già formattato.
@@ -3205,7 +3389,7 @@ function _plSec2Vendite(D){
     </div>
   </div>
   <div style="font-size:10px;color:var(--txt4);margin-bottom:14px;letter-spacing:.04em">
-    ${h(R.label)} · ${h(R.dLabel)} · ${R.giorni} giorni di calendario · <span style="color:var(--amber3)">${D.serviziPer} servizi di apertura</span>
+    ${h(R.label)} · ${h(R.dLabel)} · ${R.giorni} giorni di calendario · <span style="color:var(--amber3)">${D.serviziPer} servizi di apertura</span>${(()=>{const n=_notaChiusure(R.da,R.a);return n?` · <span style="color:var(--txt4)">${h(n)}</span>`:"";})()}
     &nbsp;·&nbsp; confronto con ${h(_parseD(R.prevDa).toLocaleDateString("it-IT"))} → ${h(_parseD(R.prevA).toLocaleDateString("it-IT"))}
   </div>`;
   // KPI performance
@@ -3263,6 +3447,60 @@ function _plSec2Vendite(D){
     {h:"Giorni stock",r:true,style:"font-family:'Montserrat',sans-serif;color:var(--amber)",render:r=>r.dio===Infinity?"∞":Math.round(r.dio)},
   ],"Nessuna referenza in giacenza");
   html+=`<div style="margin-bottom:20px">${rotCard}</div>`;
+  html+=_plSecFallate();
+  return html;
+}
+
+// §2-bis · FALLATE E DEGUSTAZIONI — quanto costano le bottiglie che non si vendono
+// Le fallate erano visibili solo come elenco nella loro sezione: qui diventano un
+// numero economico (costo sostenuto) accanto al mancato ricavo, separando le
+// perdite vere dalla degustazione didattica, che e' un investimento in formazione
+// e non uno spreco.
+function _plSecFallate(){
+  const R=_plRange();
+  const wMap=Object.fromEntries((wines||[]).map(w=>[w.id,w]));
+  const inPeriodo=(fallate||[]).filter(f=>{
+    const d=String(f.data||"").slice(0,10);
+    return d>=R.da && d<=R.a;
+  });
+  if(!inPeriodo.length){
+    return `<div style="font-size:9px;letter-spacing:.22em;text-transform:uppercase;color:var(--txt4);margin:28px 0 8px">Fallate & Degustazioni</div>
+      <div class="card" style="padding:18px;text-align:center;color:var(--txt4);font-size:12px;margin-bottom:20px">Nessuna fallata registrata nel periodo</div>`;
+  }
+  const DIDATTICA="Degustazione didattica";
+  let costoTot=0, ricavoTot=0, qtaTot=0, costoDid=0, qtaDid=0;
+  const perMotivo=new Map();
+  inPeriodo.forEach(f=>{
+    const w=wMap[f.wineId]||{};
+    const q=parseInt(f.qty)||0;
+    const costoU=(typeof calcCostoIvaBottiglia==="function"&&w.id)?(calcCostoIvaBottiglia(w)||0):(parseFloat(w.prezzoAcq)||0);
+    const cartaU=parseFloat(w.prezzoCarta)||0;
+    const c=q*costoU, r=q*cartaU;
+    costoTot+=c; ricavoTot+=r; qtaTot+=q;
+    const m=f.motivo||"Altro difetto";
+    if(m===DIDATTICA){ costoDid+=c; qtaDid+=q; }
+    const cur=perMotivo.get(m)||{qty:0,costo:0,ricavo:0};
+    cur.qty+=q; cur.costo+=c; cur.ricavo+=r; perMotivo.set(m,cur);
+  });
+  const righe=[...perMotivo.entries()].map(([motivo,v])=>({motivo,...v}))
+    .sort((a,b)=>b.costo-a.costo);
+  const costoPerdite=costoTot-costoDid, qtaPerdite=qtaTot-qtaDid;
+  let html=`<div style="font-size:9px;letter-spacing:.22em;text-transform:uppercase;color:var(--txt4);margin:28px 0 8px">Fallate & Degustazioni · ${h(R.label)}</div>
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:14px">
+    ${_plBigCard("Costo Totale",fmt(costoTot),`${qtaTot} bottiglie · IVA incl.`,"#FF375F")}
+    ${_plBigCard("Perdite Reali",fmt(costoPerdite),`${qtaPerdite} bt · difetti e rotture`,"#fb923c")}
+    ${_plBigCard("Degustazione Didattica",fmt(costoDid),`${qtaDid} bt · formazione`,"#32ADE6")}
+    ${_plBigCard("Mancato Ricavo",fmt(ricavoTot),"valore a prezzo di carta","#BF5AF2")}
+  </div>`;
+  html+=_plTbl("Dettaglio per causa","🍷",righe,[
+    {h:"Causa",render:r=>`<span style="color:${r.motivo===DIDATTICA?"#32ADE6":"#fb923c"}">${h(r.motivo)}</span>`},
+    {h:"Bottiglie",r:true,style:"font-family:'Montserrat',sans-serif",render:r=>r.qty},
+    {h:"Costo",r:true,style:"font-family:'Montserrat',sans-serif;color:#FF375F",render:r=>fmt(r.costo)},
+    {h:"Mancato ricavo",r:true,style:"font-family:'Montserrat',sans-serif;color:var(--txt3)",render:r=>fmt(r.ricavo)},
+    {h:"% sul totale",r:true,style:"color:var(--txt4)",render:r=>`${fmtN(costoTot?r.costo/costoTot*100:0,1)}%`},
+  ],"Nessuna causa registrata");
+  html=html.replace('<div style="margin-bottom:20px"></div>','');
+  html+=`<div style="height:20px"></div>`;
   return html;
 }
 
@@ -3968,7 +4206,27 @@ function _sspStep(wid,delta){
   if(inp) inp.value=q>0?q:'';
   _sspRefreshCard(wid); _updateScaricoCounts();
 }
-function _ieriStr(){ const d=new Date(); d.setDate(d.getDate()-1); return d.toISOString().split("T")[0]; }
+// Data di competenza dello scarico serata. Regola generale: si scarica a fine
+// servizio, spesso dopo mezzanotte, quindi la serata e' quella del giorno prima.
+// ECCEZIONE: i turni che si chiudono nel POMERIGGIO dello stesso giorno (es. la
+// domenica di pranzo, scarico verso le 18) appartengono al giorno corrente, non
+// alla sera precedente.
+// Configurabile per locale con CM_CONFIG.turniDiurni:[0,...] (0=domenica) e
+// CM_CONFIG.oraStacco (default 5: prima delle 5 del mattino e' ancora "ieri").
+function _dataServizioDefault(now){
+  const d = now ? new Date(now) : new Date();
+  const oraStacco = (CONFIG.oraStacco===undefined||CONFIG.oraStacco===null) ? 5 : parseInt(CONFIG.oraStacco)||0;
+  const diurni = Array.isArray(CONFIG.turniDiurni) ? CONFIG.turniDiurni : [];
+  const h = d.getHours();
+  // Dopo mezzanotte e prima dell'ora di stacco: si sta chiudendo la serata di ieri.
+  if(h < oraStacco){ d.setDate(d.getDate()-1); return _isoDate(d); }
+  // Giorno con turno diurno e scarico fatto in giornata: competenza = oggi.
+  if(diurni.includes(d.getDay())) return _isoDate(d);
+  // Sera normale: la serata in corso e' quella di ieri (scarico a fine servizio).
+  d.setDate(d.getDate()-1);
+  return _isoDate(d);
+}
+function _ieriStr(){ return _dataServizioDefault(); }
 var scaricoSerata = {
   open: false,
   listCollapsed: false,
@@ -4000,7 +4258,7 @@ function registraScaricaSerata(){
     }
   }
 
-  const data = scaricoSerata.data || (() => { const d=new Date(); d.setDate(d.getDate()-1); return d.toISOString().split("T")[0]; })();
+  const data = scaricoSerata.data || _dataServizioDefault();
   const note = scaricoSerata.note.trim();
 
   const scaricoByWineId = {};
@@ -4047,7 +4305,7 @@ function registraScaricaSingoloVino(wineId){
   if(!wine){ notify("⚠️ Vino non trovato","err"); return; }
   if(qty > wine.giacenza){ notify(`⚠️ Giacenza insufficiente (${wine.giacenza} disponibili)`,"err"); return; }
 
-  const data = scaricoSerata.data || (()=>{const d=new Date();d.setDate(d.getDate()-1);return d.toISOString().split("T")[0];})();
+  const data = scaricoSerata.data || _dataServizioDefault();
   const note = scaricoSerata.note.trim();
 
   // Aggiorna vino
@@ -5755,6 +6013,42 @@ function _renderOrdineModalBody(allFornitori, allProduttori, allNomi){
   ordineModalData.referenze.forEach(r=>{ if(r.prezzoAcq) _updateRefCartaSuggerita(r.id); });
 }
 
+// Confronta le quantita' arrivate PRIMA e DOPO la modifica di un ordine gia'
+// caricato e registra un movimento di rettifica per ogni differenza.
+// Non tocca i movimenti esistenti: il ledger e' append-only.
+function _rettificaOrdineModificato(ordinePrec,refsNuove){
+  if(!ordinePrec || ordinePrec.stato!=="caricato") return 0;
+  const oggi=today();
+  let n=0;
+  (refsNuove||[]).forEach(rn=>{
+    const rp=(ordinePrec.referenze||[]).find(x=>x.id===rn.id);
+    if(!rp) return;                          // referenza nuova: si carichera' alla ricezione
+    const prima=parseInt(rp.qtyArr)||0;
+    const dopo =parseInt(rn.qtyArr!==undefined?rn.qtyArr:rp.qtyArr)||0;
+    const diff=dopo-prima;
+    if(!diff) return;
+    const wineId=rp.wineId||rn.wineId;
+    if(!wineId) return;
+    const w=wines.find(x=>x.id===wineId);
+    if(!w) return;
+    movements.unshift({
+      id:uid(), wineId:w.id, wineName:w.nome, produttore:w.produttore||"",
+      nazione:w.nazione||"", tipo:"rettifica", qty:diff, data:oggi,
+      fattura:ordinePrec.numeroFattura||"", fornitore:ordinePrec.fornitore||"",
+      origine:"ordine", ordineId:ordinePrec.id||"",
+      note:`Rettifica ordine ${ordinePrec.dataOrdine||""}: arrivate ${prima} \u2192 ${dopo}`,
+      ts:Date.now()
+    });
+    // La giacenza segue il ledger; qui si allinea subito anche il blob e i lotti,
+    // cosi' l'utente vede il numero giusto senza attendere la riconciliazione.
+    const nuovaGiac=Math.max(0,(parseInt(w.giacenza)||0)+diff);
+    wines=wines.map(x=>x.id!==w.id?x:{...x,giacenza:nuovaGiac,lots:_riallineaLotti(x,nuovaGiac)});
+    n++;
+  });
+  if(n) notify(`\u2696\ufe0f ${n} rettific${n===1?"a registrata":"he registrate"} sui movimenti`);
+  return n;
+}
+
 function _refRowHtml(r,i,tipoOpts,ivaOpts,allProduttori,allNomi){
   const selTipo=_tipoOptsHtml(r.tipologia);
   const selIva=IVA_OPTIONS.map(v=>`<option value="${v}"${v===r.iva?" selected":""}>${v}%</option>`).join("");
@@ -5994,6 +6288,11 @@ function salvaOrdine(){
       iva:parseInt(r.iva)||22,
       prezzoCarta:parseFloat(r.prezzoCarta)||0,
       qty:parseInt(r.qty)||1,
+      // qtyArr (bottiglie effettivamente arrivate) va PRESERVATO: non e' un campo
+      // del modulo ma il risultato della ricezione. Senza questa riga, modificare
+      // un ordine gia' caricato lo azzerava, facendo sparire dallo storico le
+      // quantita' ricevute.
+      ...(r.qtyArr!==undefined&&r.qtyArr!==null?{qtyArr:parseInt(r.qtyArr)||0}:{}),
       scontoRef:parseFloat(r.scontoRef)||0
     });
   });
@@ -6005,6 +6304,13 @@ function salvaOrdine(){
     // Update existing
     const idx=orders.findIndex(o=>o.id===ordineModalData.id);
     if(idx>=0){
+      // Se l'ordine e' GIA' CARICATO, le quantita' arrivate hanno gia' generato
+      // movimenti di carico. Cambiarle qui aggiornerebbe l'ordine lasciando lo
+      // storico invariato: ordine e movimenti divergerebbero in silenzio.
+      // Si genera invece un movimento di rettifica con la sola differenza, cosi'
+      // il ledger resta veritiero (non si riscrive nulla all'indietro) e le
+      // giacenze, che derivano dal ledger, tornano coerenti.
+      _rettificaOrdineModificato(orders[idx],refs);
       orders[idx]={...orders[idx],fornitore,dataOrdine,note,sconto:parseFloat(document.getElementById("omd-sconto")?.value)||ordineModalData.sconto||0,referenze:refs};
     } else {
       // Bozza remota (_bozzeSb): promuovi a ordine normale in orders.
