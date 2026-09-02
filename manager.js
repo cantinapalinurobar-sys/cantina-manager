@@ -1149,13 +1149,6 @@ function _saldoLedgerPerVino(){
     if(!m || m.deleted || !m.wineId) return;
     map.set(m.wineId,(map.get(m.wineId)||0)+_ledgerDelta(m));
   });
-  // Le fallate NON sono movimenti: vivono nel proprio array e decrementano la
-  // giacenza al momento della registrazione. Senza contarle qui, la
-  // riconciliazione le farebbe "risorgere" a ogni giro.
-  (typeof fallate!=="undefined"?fallate:[]).forEach(f=>{
-    if(!f || f.deleted || !f.wineId) return;
-    map.set(f.wineId,(map.get(f.wineId)||0)-(parseInt(f.qty)||0));
-  });
   return map;
 }
 // Referenze la cui storia nel ledger comincia dall'origine (c'e' almeno un
@@ -3447,60 +3440,6 @@ function _plSec2Vendite(D){
     {h:"Giorni stock",r:true,style:"font-family:'Montserrat',sans-serif;color:var(--amber)",render:r=>r.dio===Infinity?"∞":Math.round(r.dio)},
   ],"Nessuna referenza in giacenza");
   html+=`<div style="margin-bottom:20px">${rotCard}</div>`;
-  html+=_plSecFallate();
-  return html;
-}
-
-// §2-bis · FALLATE E DEGUSTAZIONI — quanto costano le bottiglie che non si vendono
-// Le fallate erano visibili solo come elenco nella loro sezione: qui diventano un
-// numero economico (costo sostenuto) accanto al mancato ricavo, separando le
-// perdite vere dalla degustazione didattica, che e' un investimento in formazione
-// e non uno spreco.
-function _plSecFallate(){
-  const R=_plRange();
-  const wMap=Object.fromEntries((wines||[]).map(w=>[w.id,w]));
-  const inPeriodo=(fallate||[]).filter(f=>{
-    const d=String(f.data||"").slice(0,10);
-    return d>=R.da && d<=R.a;
-  });
-  if(!inPeriodo.length){
-    return `<div style="font-size:9px;letter-spacing:.22em;text-transform:uppercase;color:var(--txt4);margin:28px 0 8px">Fallate & Degustazioni</div>
-      <div class="card" style="padding:18px;text-align:center;color:var(--txt4);font-size:12px;margin-bottom:20px">Nessuna fallata registrata nel periodo</div>`;
-  }
-  const DIDATTICA="Degustazione didattica";
-  let costoTot=0, ricavoTot=0, qtaTot=0, costoDid=0, qtaDid=0;
-  const perMotivo=new Map();
-  inPeriodo.forEach(f=>{
-    const w=wMap[f.wineId]||{};
-    const q=parseInt(f.qty)||0;
-    const costoU=(typeof calcCostoIvaBottiglia==="function"&&w.id)?(calcCostoIvaBottiglia(w)||0):(parseFloat(w.prezzoAcq)||0);
-    const cartaU=parseFloat(w.prezzoCarta)||0;
-    const c=q*costoU, r=q*cartaU;
-    costoTot+=c; ricavoTot+=r; qtaTot+=q;
-    const m=f.motivo||"Altro difetto";
-    if(m===DIDATTICA){ costoDid+=c; qtaDid+=q; }
-    const cur=perMotivo.get(m)||{qty:0,costo:0,ricavo:0};
-    cur.qty+=q; cur.costo+=c; cur.ricavo+=r; perMotivo.set(m,cur);
-  });
-  const righe=[...perMotivo.entries()].map(([motivo,v])=>({motivo,...v}))
-    .sort((a,b)=>b.costo-a.costo);
-  const costoPerdite=costoTot-costoDid, qtaPerdite=qtaTot-qtaDid;
-  let html=`<div style="font-size:9px;letter-spacing:.22em;text-transform:uppercase;color:var(--txt4);margin:28px 0 8px">Fallate & Degustazioni · ${h(R.label)}</div>
-  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:14px">
-    ${_plBigCard("Costo Totale",fmt(costoTot),`${qtaTot} bottiglie · IVA incl.`,"#FF375F")}
-    ${_plBigCard("Perdite Reali",fmt(costoPerdite),`${qtaPerdite} bt · difetti e rotture`,"#fb923c")}
-    ${_plBigCard("Degustazione Didattica",fmt(costoDid),`${qtaDid} bt · formazione`,"#32ADE6")}
-    ${_plBigCard("Mancato Ricavo",fmt(ricavoTot),"valore a prezzo di carta","#BF5AF2")}
-  </div>`;
-  html+=_plTbl("Dettaglio per causa","🍷",righe,[
-    {h:"Causa",render:r=>`<span style="color:${r.motivo===DIDATTICA?"#32ADE6":"#fb923c"}">${h(r.motivo)}</span>`},
-    {h:"Bottiglie",r:true,style:"font-family:'Montserrat',sans-serif",render:r=>r.qty},
-    {h:"Costo",r:true,style:"font-family:'Montserrat',sans-serif;color:#FF375F",render:r=>fmt(r.costo)},
-    {h:"Mancato ricavo",r:true,style:"font-family:'Montserrat',sans-serif;color:var(--txt3)",render:r=>fmt(r.ricavo)},
-    {h:"% sul totale",r:true,style:"color:var(--txt4)",render:r=>`${fmtN(costoTot?r.costo/costoTot*100:0,1)}%`},
-  ],"Nessuna causa registrata");
-  html=html.replace('<div style="margin-bottom:20px"></div>','');
-  html+=`<div style="height:20px"></div>`;
   return html;
 }
 
@@ -4206,31 +4145,59 @@ function _sspStep(wid,delta){
   if(inp) inp.value=q>0?q:'';
   _sspRefreshCard(wid); _updateScaricoCounts();
 }
-// Data di competenza dello scarico serata. Regola generale: si scarica a fine
-// servizio, spesso dopo mezzanotte, quindi la serata e' quella del giorno prima.
-// ECCEZIONE: i turni che si chiudono nel POMERIGGIO dello stesso giorno (es. la
-// domenica di pranzo, scarico verso le 18) appartengono al giorno corrente, non
-// alla sera precedente.
-// Configurabile per locale con CM_CONFIG.turniDiurni:[0,...] (0=domenica) e
-// CM_CONFIG.oraStacco (default 5: prima delle 5 del mattino e' ancora "ieri").
-function _dataServizioDefault(now){
-  const d = now ? new Date(now) : new Date();
-  const oraStacco = (CONFIG.oraStacco===undefined||CONFIG.oraStacco===null) ? 5 : parseInt(CONFIG.oraStacco)||0;
-  const diurni = Array.isArray(CONFIG.turniDiurni) ? CONFIG.turniDiurni : [];
-  const h = d.getHours();
-  // Dopo mezzanotte e prima dell'ora di stacco: si sta chiudendo la serata di ieri.
-  if(h < oraStacco){ d.setDate(d.getDate()-1); return _isoDate(d); }
-  // Giorno con turno diurno e scarico fatto in giornata: competenza = oggi.
-  if(diurni.includes(d.getDay())) return _isoDate(d);
-  // Sera normale: la serata in corso e' quella di ieri (scarico a fine servizio).
-  d.setDate(d.getDate()-1);
-  return _isoDate(d);
+function _ieriStr(){ const d=new Date(); d.setDate(d.getDate()-1); return _isoD(d); }
+// ── GIORNATA DI SERVIZIO ─────────────────────────────────────────────────────
+// Uno scarico registrato oggi si riferisce, di norma, alla SERATA PRECEDENTE:
+// il conteggio bottiglie si fa a locale chiuso, il giorno dopo. Fanno eccezione
+// i giorni con TURNO DIURNO (pranzo), in cui lo scarico appartiene al giorno
+// stesso. Unica fonte di verita' per la data di default di OGNI scarico.
+// CM_CONFIG: turniDiurni:[0]  (0=domenica … 6=sabato)
+//            attribuzioneSerataPrec:false  → disattiva la regola (data = oggi)
+function _turniDiurniSet(){
+  const t=CONFIG.turniDiurni;
+  return new Set((Array.isArray(t)?t:[0]).map(Number));
 }
-function _ieriStr(){ return _dataServizioDefault(); }
+function _isTurnoDiurno(dataISO){
+  const d=dataISO?_parseD(dataISO):new Date();
+  return _turniDiurniSet().has(d.getDay());
+}
+// Ultimo giorno EFFETTIVAMENTE lavorato a partire da una data inclusa: salta i
+// giorni fuori calendario di apertura e le chiusure straordinarie. Serve perche'
+// "ieri" non e' sempre un giorno di servizio (Lagrandissima e' chiusa il lunedi':
+// lo scarico del martedi' mattina compete alla domenica, non al lunedi').
+function _ultimoGiornoServizio(dataISO){
+  const apert=new Set(CONFIG.giorniApertura||[0,1,2,3,4,5,6]);
+  let d=_parseD(dataISO);
+  for(let i=0;i<14;i++){
+    const g=_isoD(d);
+    if(apert.has(d.getDay()) && !_isChiuso(g)) return g;
+    d=_shiftD(d,-1);
+  }
+  return dataISO; // calendario incoerente: meglio la data grezza che un salto assurdo
+}
+// Regole, in ordine:
+//  1. prima di CONFIG.oraStacco (default 5) si sta ancora chiudendo la serata
+//     in corso → giorno precedente, qualunque sia il giorno;
+//  2. giorno con TURNO DIURNO (pranzo, CONFIG.turniDiurni) → giorno stesso;
+//  3. altrimenti → ultimo giorno di servizio precedente.
+function _dataServizioDefault(ref){
+  const d = ref instanceof Date ? new Date(ref) : new Date();
+  if(CONFIG.attribuzioneSerataPrec===false) return _isoD(d);
+  const stacco = CONFIG.oraStacco==null ? 5 : (parseInt(CONFIG.oraStacco)||0);
+  if(d.getHours() < stacco) return _ultimoGiornoServizio(_isoD(_shiftD(d,-1)));
+  if(_turniDiurniSet().has(d.getDay())) return _isoD(d);
+  return _ultimoGiornoServizio(_isoD(_shiftD(d,-1)));
+}
+// Etichetta breve per la UI: "Serata di ven 12/09" / "Pranzo di dom 14/09".
+function _labelGiornataServizio(dataISO){
+  const d=_parseD(dataISO);
+  const g=d.toLocaleDateString("it-IT",{weekday:"short",day:"2-digit",month:"2-digit"});
+  return `${_isTurnoDiurno(dataISO)?"Servizio":"Serata"} ${g}`;
+}
 var scaricoSerata = {
   open: false,
   listCollapsed: false,
-  get data(){ return this._data || _ieriStr(); },
+  get data(){ return this._data || _dataServizioDefault(); },
   set data(v){ this._data = v; },
   note: "",
   sort: "nome",  // 'nome' | 'tipo' | 'giacenza'
@@ -4364,7 +4331,7 @@ function renderMovimenti(){
       <div class="section-label"><span>📦 Registra Movimento</span></div>
       <div class="form-grid g2" style="margin-bottom:8px">
         <div><label class="form-label">Tipo</label>
-          <select class="form-select" onchange="movForm.tipo=this.value;render()">
+          <select class="form-select" onchange="_movFormSetTipo(this.value)">
             <option value="carico" ${movForm.tipo==="carico"?"selected":""}>📦 Carico</option>
             <option value="scarico" ${movForm.tipo==="scarico"?"selected":""}>🍾 Scarico</option>
             <option value="rettifica" ${_isRettifica(movForm.tipo)?"selected":""}>🩹 Rettifica giacenza (± senza spesa)</option>
@@ -5062,6 +5029,15 @@ function _movUpdateCartaPreview(){
   `;
 }
 
+// Cambio tipo movimento: per lo scarico propone la giornata di servizio, per
+// carico/rettifica la data odierna. Non tocca una data scelta manualmente.
+function _movFormSetTipo(v){
+  const auto = movForm.data===today() || movForm.data===_dataServizioDefault();
+  movForm.tipo=v;
+  if(auto) movForm.data = (v==="scarico") ? _dataServizioDefault() : today();
+  render();
+}
+
 function registraMovimento(){
   if(!_syncGate("Registrazione movimento")) return;
   // Refresh date if the field was left empty (e.g. session crossed midnight)
@@ -5301,6 +5277,7 @@ function renderOrdini(){
         <button class="btn-outline btn-sm" onclick="stampaOrdine('${o.id}')" title="Stampa / Salva PDF" style="border-color:rgba(0,122,255,.3);color:#007AFF">🖨️</button>
         <button class="btn-outline btn-sm" onclick="emailOrdine('${o.id}')" title="Invia via email" style="border-color:rgba(255,159,10,.3);color:var(--amber)">✉️</button>
         <button class="btn-outline btn-sm" onclick="whatsappOrdine('${o.id}')" title="Invia su WhatsApp" style="border-color:rgba(37,211,102,.3);color:#25D366">🟢</button>
+        ${CONFIG.trasferimenti?`<button class="btn-outline btn-sm" onclick="inviaOrdineAdAltroLocale('${o.id}')" title="Passa l'ordine a un altro locale (manifesto)" style="border-color:rgba(90,200,250,.4);color:#5AC8FA">🔄</button>`:''}
         <button class="btn-icon" onclick="deleteOrdine('${o.id}')" title="Elimina" style="color:var(--txt4);font-size:14px">🗑️</button>
       </td>
     </tr>`;
@@ -5408,7 +5385,7 @@ function renderOrdini(){
 
   <!-- Modal Nuovo/Modifica Ordine -->
   <div id="ordine-modal-backdrop" class="modal-backdrop hidden" onclick="chiudiOrdineModal(event)">
-    <div class="modal" style="width:94vw;max-width:1500px" onclick="event.stopPropagation()">
+    <div class="modal cm-modal-xl" onclick="event.stopPropagation()">
       <div class="modal-header">
         <h2 id="ordine-modal-title">➕ Nuovo Ordine</h2>
         <button style="font-size:18px;color:var(--txt3)" onclick="chiudiOrdineModal()">✕</button>
@@ -5419,6 +5396,7 @@ function renderOrdini(){
         <button class="btn-outline" onclick="stampaOrdine(ordineModalData?.id)" title="Stampa / Salva PDF" style="border-color:rgba(0,122,255,.3);color:#007AFF">🖨️ Stampa / PDF</button>
         <button class="btn-outline" onclick="emailOrdine(ordineModalData?.id)" title="Invia via email" style="border-color:rgba(255,159,10,.3);color:var(--amber)">✉️ Email fornitore</button>
         <button class="btn-outline" onclick="whatsappOrdine(ordineModalData?.id)" title="Invia su WhatsApp" style="border-color:rgba(37,211,102,.3);color:#25D366">🟢 WhatsApp</button>
+        ${CONFIG.trasferimenti?`<button class="btn-outline" onclick="inviaOrdineAdAltroLocale(ordineModalData?.id)" title="Passa l'ordine a un altro locale" style="border-color:rgba(90,200,250,.4);color:#5AC8FA">🔄 Passa a un locale</button>`:''}
         <button class="btn-primary" onclick="salvaOrdine()">💾 Salva Ordine</button>
       </div>
     </div>
@@ -5426,7 +5404,7 @@ function renderOrdini(){
 
   <!-- Modal Ricezione Singola Ordine -->
   <div id="ricezione-modal-backdrop" class="modal-backdrop hidden" onclick="chiudiRicezioneModal(event)">
-    <div class="modal" style="max-width:820px" onclick="event.stopPropagation()">
+    <div class="modal cm-modal-xl" onclick="event.stopPropagation()">
       <div class="modal-header">
         <h2>📦 Conferma Arrivo Ordine</h2>
         <button style="font-size:18px;color:var(--txt3)" onclick="chiudiRicezioneModal()">✕</button>
@@ -5980,27 +5958,34 @@ function _renderOrdineModalBody(allFornitori, allProduttori, allNomi){
     </div>
     <!-- Referenze -->
     <div class="modal-section-label">🍾 Referenze dell'ordine</div>
-    <div style="overflow-x:auto">
-      <table style="width:100%;border-collapse:collapse;min-width:1100px">
+    <div class="cm-grid-wrap">
+      <table class="cm-grid-tbl">
+        <colgroup>
+          <col style="width:10%"><col style="width:12.5%"><col style="width:7%"><col style="width:4.5%">
+          <col style="width:7.5%"><col style="width:6%"><col style="width:6.5%"><col style="width:7%">
+          <col style="width:0">
+          <col style="width:6.5%"><col style="width:4.5%"><col style="width:5.5%"><col style="width:6%">
+          <col style="width:4%"><col style="width:4.5%"><col style="width:6.5%"><col style="width:3%">
+        </colgroup>
         <thead>
-          <tr style="font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:var(--txt4)">
-            <td style="padding:6px 8px;min-width:120px">Produttore</td>
-            <td style="padding:6px 8px;min-width:120px">Nome Vino</td>
-            <td style="padding:6px 8px;min-width:90px">Vitigni</td>
-            <td style="padding:6px 8px;min-width:56px">Annata</td>
-            <td style="padding:6px 8px;min-width:90px">Tipologia</td>
-            <td style="padding:6px 8px;min-width:80px">Formato</td>
-            <td style="padding:6px 8px;min-width:90px">Nazione</td>
-            <td style="padding:6px 8px;min-width:100px">Regione</td>
-            <td style="padding:6px 8px;width:0;padding:0;overflow:hidden;max-width:0"></td>
-            <td style="padding:6px 8px;min-width:90px">P.Acq ex IVA</td>
-            <td style="padding:6px 8px;min-width:56px">IVA</td>
-            <td style="padding:6px 8px;min-width:90px">P.Acq+IVA</td>
-            <td style="padding:6px 8px;min-width:80px">P.Carta</td>
-            <td style="padding:6px 8px;min-width:56px">Qty</td>
-            <td style="padding:6px 8px;min-width:64px;text-align:center;background:rgba(255,69,58,.04)">Sc.%</td>
-            <td style="padding:6px 8px;min-width:80px;text-align:right;background:rgba(48,209,88,.04)">Tot. riga</td>
-            <td style="padding:6px 8px;min-width:28px"></td>
+          <tr class="cm-grid-head">
+            <td>Produttore</td>
+            <td>Nome Vino</td>
+            <td>Vitigni</td>
+            <td>Annata</td>
+            <td>Tipologia</td>
+            <td>Formato</td>
+            <td>Nazione</td>
+            <td>Regione</td>
+            <td class="cm-col-hidden"></td>
+            <td>P.Acq ex IVA</td>
+            <td>IVA</td>
+            <td>P.Acq+IVA</td>
+            <td>P.Carta</td>
+            <td style="text-align:center">Qty</td>
+            <td style="text-align:center;background:rgba(255,69,58,.04)">Sc.%</td>
+            <td style="text-align:right;background:rgba(48,209,88,.04)">Tot. riga</td>
+            <td></td>
           </tr>
         </thead>
         <tbody id="omd-refs-body">${refsHtml}</tbody>
@@ -6011,42 +5996,6 @@ function _renderOrdineModalBody(allFornitori, allProduttori, allNomi){
   _updateOrdineModalTotale();
   // Inizializza suggerimenti P.Carta per righe con prezzoAcq già valorizzato (es. ordine in modifica)
   ordineModalData.referenze.forEach(r=>{ if(r.prezzoAcq) _updateRefCartaSuggerita(r.id); });
-}
-
-// Confronta le quantita' arrivate PRIMA e DOPO la modifica di un ordine gia'
-// caricato e registra un movimento di rettifica per ogni differenza.
-// Non tocca i movimenti esistenti: il ledger e' append-only.
-function _rettificaOrdineModificato(ordinePrec,refsNuove){
-  if(!ordinePrec || ordinePrec.stato!=="caricato") return 0;
-  const oggi=today();
-  let n=0;
-  (refsNuove||[]).forEach(rn=>{
-    const rp=(ordinePrec.referenze||[]).find(x=>x.id===rn.id);
-    if(!rp) return;                          // referenza nuova: si carichera' alla ricezione
-    const prima=parseInt(rp.qtyArr)||0;
-    const dopo =parseInt(rn.qtyArr!==undefined?rn.qtyArr:rp.qtyArr)||0;
-    const diff=dopo-prima;
-    if(!diff) return;
-    const wineId=rp.wineId||rn.wineId;
-    if(!wineId) return;
-    const w=wines.find(x=>x.id===wineId);
-    if(!w) return;
-    movements.unshift({
-      id:uid(), wineId:w.id, wineName:w.nome, produttore:w.produttore||"",
-      nazione:w.nazione||"", tipo:"rettifica", qty:diff, data:oggi,
-      fattura:ordinePrec.numeroFattura||"", fornitore:ordinePrec.fornitore||"",
-      origine:"ordine", ordineId:ordinePrec.id||"",
-      note:`Rettifica ordine ${ordinePrec.dataOrdine||""}: arrivate ${prima} \u2192 ${dopo}`,
-      ts:Date.now()
-    });
-    // La giacenza segue il ledger; qui si allinea subito anche il blob e i lotti,
-    // cosi' l'utente vede il numero giusto senza attendere la riconciliazione.
-    const nuovaGiac=Math.max(0,(parseInt(w.giacenza)||0)+diff);
-    wines=wines.map(x=>x.id!==w.id?x:{...x,giacenza:nuovaGiac,lots:_riallineaLotti(x,nuovaGiac)});
-    n++;
-  });
-  if(n) notify(`\u2696\ufe0f ${n} rettific${n===1?"a registrata":"he registrate"} sui movimenti`);
-  return n;
 }
 
 function _refRowHtml(r,i,tipoOpts,ivaOpts,allProduttori,allNomi){
@@ -6288,11 +6237,6 @@ function salvaOrdine(){
       iva:parseInt(r.iva)||22,
       prezzoCarta:parseFloat(r.prezzoCarta)||0,
       qty:parseInt(r.qty)||1,
-      // qtyArr (bottiglie effettivamente arrivate) va PRESERVATO: non e' un campo
-      // del modulo ma il risultato della ricezione. Senza questa riga, modificare
-      // un ordine gia' caricato lo azzerava, facendo sparire dallo storico le
-      // quantita' ricevute.
-      ...(r.qtyArr!==undefined&&r.qtyArr!==null?{qtyArr:parseInt(r.qtyArr)||0}:{}),
       scontoRef:parseFloat(r.scontoRef)||0
     });
   });
@@ -6304,13 +6248,6 @@ function salvaOrdine(){
     // Update existing
     const idx=orders.findIndex(o=>o.id===ordineModalData.id);
     if(idx>=0){
-      // Se l'ordine e' GIA' CARICATO, le quantita' arrivate hanno gia' generato
-      // movimenti di carico. Cambiarle qui aggiornerebbe l'ordine lasciando lo
-      // storico invariato: ordine e movimenti divergerebbero in silenzio.
-      // Si genera invece un movimento di rettifica con la sola differenza, cosi'
-      // il ledger resta veritiero (non si riscrive nulla all'indietro) e le
-      // giacenze, che derivano dal ledger, tornano coerenti.
-      _rettificaOrdineModificato(orders[idx],refs);
       orders[idx]={...orders[idx],fornitore,dataOrdine,note,sconto:parseFloat(document.getElementById("omd-sconto")?.value)||ordineModalData.sconto||0,referenze:refs};
     } else {
       // Bozza remota (_bozzeSb): promuovi a ordine normale in orders.
@@ -6382,23 +6319,36 @@ function _renderRicezioneModalBody(ordine, allForn, allProd, allNomi){
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
       <div><label class="form-label">Data Arrivo Effettiva</label>
-        <input id="ric-data-input" type="date" class="form-input" value="${today()}" onchange="ricezioneModalData.dataArrivo=this.value"></div>
+        <input id="ric-data-input" type="date" class="form-input" value="${h(ricezioneModalData.dataArrivo||today())}" onchange="ricezioneModalData.dataArrivo=this.value"></div>
       <div><label class="form-label">Numero Fattura <span style="color:var(--txt4)">(opzionale)</span></label>
-        <input id="ric-fattura-input" type="text" class="form-input" placeholder="Es. FT-2025-001" onchange="ricezioneModalData.fattura=this.value.trim()"></div>
+        <input id="ric-fattura-input" type="text" class="form-input" placeholder="Es. FT-2025-001" value="${h(ricezioneModalData.fattura||'')}" onchange="ricezioneModalData.fattura=this.value.trim()"></div>
     </div>
-    <div style="overflow-x:auto">
-      <table style="width:100%;border-collapse:collapse;min-width:600px">
-        <thead><tr style="font-size:9px;letter-spacing:.15em;text-transform:uppercase;color:var(--txt4)">
-          <td style="padding:6px 8px">Produttore</td>
-          <td style="padding:6px 8px">Nome Vino</td>
-          <td style="padding:6px 8px;text-align:center;color:var(--amber)">Annata</td>
-          <td style="padding:6px 8px;text-align:center">Formato</td>
-          <td style="padding:6px 8px">Vitigni</td>
-          <td style="padding:6px 8px">Tipo</td>
-          <td style="padding:6px 8px;text-align:center">Ordinato</td>
-          <td style="padding:6px 8px;text-align:center;color:var(--amber)">Arrivato ✏️</td>
-          <td style="padding:6px 8px">P.Acq ✏️</td>
-          <td style="padding:6px 8px;width:64px"></td>
+    <div class="cm-grid-wrap">
+      <table class="cm-grid-tbl">
+        <colgroup>
+          <col style="width:10%"><col style="width:13%"><col style="width:4.5%"><col style="width:5.5%">
+          <col style="width:8%"><col style="width:7%"><col style="width:6.5%"><col style="width:7%">
+          <col style="width:5%"><col style="width:5.5%">
+          <col style="width:6%"><col style="width:4.5%"><col style="width:5.5%"><col style="width:5.5%">
+          <col style="width:6%"><col style="width:3.5%">
+        </colgroup>
+        <thead><tr class="cm-grid-head">
+          <td>Produttore</td>
+          <td>Nome Vino</td>
+          <td style="text-align:center;color:var(--amber)">Annata</td>
+          <td style="text-align:center">Formato</td>
+          <td>Vitigni</td>
+          <td>Tipo</td>
+          <td>Nazione</td>
+          <td>Regione</td>
+          <td style="text-align:center">Ordin.</td>
+          <td style="text-align:center;color:var(--amber)">Arrivato ✏️</td>
+          <td>P.Acq ✏️</td>
+          <td>IVA ✏️</td>
+          <td style="text-align:right">P.Acq+IVA</td>
+          <td>P.Carta ✏️</td>
+          <td style="text-align:right;background:rgba(48,209,88,.04)">Tot. riga</td>
+          <td></td>
         </tr></thead>
         <tbody id="ric-righe-body">${righeHtml}</tbody>
       </table>
@@ -6422,27 +6372,61 @@ function _aggiornaRicTotale(){
 // sbagliate). I dati completi si inseriscono nella scheda, non in linea.
 function _ricRowHtml(r){
   const ex=!!r._extra;
+  const iva=parseInt(r.iva)||22;
+  const ivaIncl=(parseFloat(r.prezzoAcq)||0)*(1+iva/100);
+  const tot=ivaIncl*(parseInt(r.qtyArr)||0);
+  const ivaOpts=IVA_OPTIONS.map(v=>`<option value="${v}"${v===iva?" selected":""}>${v}%</option>`).join("");
+  const short=(parseInt(r.qtyArr)||0)<(parseInt(r.qty)||0) && !ex;
   return `
     <tr data-ric-id="${r.id}" style="border-top:1px solid var(--border)${ex?";background:rgba(255,159,10,.05)":""}">
-      <td style="padding:5px 8px;color:var(--txt3)">${h(r.produttore||'—')}</td>
-      <td style="padding:5px 8px">${h(r.nomeVino||'—')}${ex?` <span style="font-size:9px;color:var(--amber3);letter-spacing:.1em">NON PREVISTA</span>`:""}</td>
-      <td style="padding:5px 8px;color:var(--amber);font-family:'Montserrat',sans-serif;text-align:center;font-size:11px;white-space:nowrap">${r.annata?h(r.annata):'<span style="color:var(--txt4)">N.V.</span>'}</td>
-      <td style="padding:5px 8px;color:var(--txt4);font-size:10px;text-align:center;white-space:nowrap">${parseFloat(r.formato)||0.75}L</td>
-      <td style="padding:5px 8px;color:var(--txt3);font-size:10px">${h(r.vitigni||'—')}</td>
-      <td style="padding:5px 8px">${badge(r.tipologia)}</td>
-      <td style="padding:5px 8px;color:var(--txt2);text-align:center">${ex?'<span style="color:var(--txt4)">—</span>':r.qty}</td>
-      <td style="padding:5px 8px">
-        <input type="number" class="form-input" style="font-size:11px;text-align:center" inputmode="numeric" pattern="[0-9]*" onfocus="this.select()" value="${r.qtyArr}" min="0" step="1"
-          onchange="_ricRefChange('${r.id}','qtyArr',parseInt(this.value)||0);_aggiornaRicTotale()"
-          oninput="_ricRefChange('${r.id}','qtyArr',parseInt(this.value)||0);_aggiornaRicTotale()">
+      <td style="color:var(--txt3)">${h(r.produttore||'—')}</td>
+      <td>${h(r.nomeVino||'—')}${ex?` <span style="font-size:9px;color:var(--amber3);letter-spacing:.1em">NON PREVISTA</span>`:""}</td>
+      <td style="color:var(--amber);text-align:center;white-space:nowrap">${r.annata?h(r.annata):'<span style="color:var(--txt4)">N.V.</span>'}</td>
+      <td style="color:var(--txt3);text-align:center;white-space:nowrap">${parseFloat(r.formato)||0.75}L</td>
+      <td style="color:var(--txt3)">${h(r.vitigni||'—')}</td>
+      <td>${badge(r.tipologia)}</td>
+      <td style="color:var(--txt3)">${h(r.nazione||'—')}</td>
+      <td style="color:var(--txt3)">${h(r.regione||'—')}</td>
+      <td style="color:var(--txt2);text-align:center">${ex?'<span style="color:var(--txt4)">—</span>':r.qty}</td>
+      <td>
+        <input type="number" class="form-input${short?" cm-ric-short":""}" style="text-align:center" inputmode="numeric" pattern="[0-9]*" onfocus="this.select()" value="${r.qtyArr}" min="0" step="1"
+          oninput="_ricRefChange('${r.id}','qtyArr',parseInt(this.value)||0);_ricRowRecalc('${r.id}')">
       </td>
-      <td style="padding:5px 8px">
-        <input type="number" class="form-input" style="font-size:11px" value="${r.prezzoAcq||''}" step="0.01" min="0" placeholder="0.00"
-          onchange="_ricRefChange('${r.id}','prezzoAcq',parseFloat(this.value)||0);_aggiornaRicTotale()">
+      <td>
+        <input type="number" class="form-input" style="text-align:right" value="${r.prezzoAcq||''}" step="0.01" min="0" placeholder="0.00"
+          oninput="_ricRefChange('${r.id}','prezzoAcq',parseFloat(this.value)||0);_ricRowRecalc('${r.id}')">
       </td>
-      <td style="padding:5px 4px;text-align:right;white-space:nowrap">${ex?`<button class="btn-outline btn-sm" style="padding:2px 6px;font-size:10px" onclick="_addRicezioneRow('${r.id}')" title="Modifica scheda">✏️</button> <button style="color:var(--txt4);font-size:13px;background:none;border:none;cursor:pointer" onclick="_ricRemoveRow('${r.id}')" title="Rimuovi">✕</button>`:""}</td>
+      <td>
+        <select class="form-input" onchange="_ricRefChange('${r.id}','iva',parseInt(this.value)||22);_ricRowRecalc('${r.id}')">${ivaOpts}</select>
+      </td>
+      <td id="ric-ivaincl-${r.id}" style="text-align:right;color:var(--amber);font-weight:600;white-space:nowrap;background:rgba(255,159,10,.06)">${ivaIncl?fmtRound(ivaIncl):"—"}</td>
+      <td>
+        <input type="number" class="form-input" style="text-align:right" value="${r.prezzoCarta||''}" step="1" min="0" placeholder="0"
+          oninput="_ricRefChange('${r.id}','prezzoCarta',parseFloat(this.value)||0)">
+      </td>
+      <td id="ric-tot-${r.id}" style="text-align:right;white-space:nowrap;background:rgba(48,209,88,.04)">${tot?fmtRound(tot):"—"}</td>
+      <td style="text-align:right;white-space:nowrap">${ex?`<button class="btn-outline btn-sm" style="padding:2px 5px;font-size:10px" onclick="_addRicezioneRow('${r.id}')" title="Modifica scheda">✏️</button> <button style="color:var(--txt4);font-size:13px;background:none;border:none;cursor:pointer" onclick="_ricRemoveRow('${r.id}')" title="Rimuovi">✕</button>`:""}</td>
     </tr>`;
 }
+
+// Ricalcolo chirurgico della singola riga di ricezione (IVA incl., totale riga,
+// evidenza quantita' mancante) senza rigenerare l'intera tabella: evita la
+// perdita di focus mentre si digitano le quantita' arrivate.
+function _ricRowRecalc(id){
+  const r=ricezioneModalData?.righe.find(x=>x.id===id);
+  if(!r) return;
+  const ivaIncl=(parseFloat(r.prezzoAcq)||0)*(1+(parseInt(r.iva)||22)/100);
+  const tot=ivaIncl*(parseInt(r.qtyArr)||0);
+  const a=document.getElementById(`ric-ivaincl-${id}`);
+  if(a) a.textContent=ivaIncl?fmtRound(ivaIncl):"—";
+  const b=document.getElementById(`ric-tot-${id}`);
+  if(b) b.textContent=tot?fmtRound(tot):"—";
+  const row=document.querySelector(`tr[data-ric-id="${id}"]`);
+  const inp=row?row.querySelector('td:nth-child(10) input'):null;
+  if(inp) inp.classList.toggle("cm-ric-short", !r._extra && (parseInt(r.qtyArr)||0)<(parseInt(r.qty)||0));
+  _aggiornaRicTotale();
+}
+
 function _ricRenderRighe(){
   const tbody=document.getElementById("ric-righe-body");
   if(tbody) tbody.innerHTML=ricezioneModalData.righe.map(r=>_ricRowHtml(r)).join("");
@@ -9141,6 +9125,9 @@ function registraMovimentoMobileQty(wineId, delta){
   const prevLots = JSON.parse(JSON.stringify(wine.lots||[]));
   const tipo = delta > 0 ? "carico" : "scarico";
   const dateStr = today();
+  // Lo scarico appartiene alla giornata di servizio (serata precedente, salvo
+  // turni diurni); il carico resta datato al giorno in cui entra la merce.
+  const dataMov = tipo === "scarico" ? _dataServizioDefault() : dateStr;
   const fattura = `MOB-${dateStr}`;
   const movId = uid();
 
@@ -9162,8 +9149,8 @@ function registraMovimentoMobileQty(wineId, delta){
     }
   });
   const newMov = {id:movId, wineId, wineName:wine.nome, produttore:wine.produttore,
-    tipo, qty, data:dateStr, fattura, fornitore:"", note:"[mobile]", ts:Date.now(),
-    ...(tipo==="scarico" ? {costoUnitarioIva:calcCostoIvaBottiglia(wine), servizio:parseFloat(CONFIG.servizioBottiglia)||0, prezzoCartaSnap:parseFloat(wine.prezzoCarta)||0} : {})};
+    tipo, qty, data:dataMov, fattura, fornitore:"", note:"[mobile]", ts:Date.now(),
+    ...(tipo==="scarico" ? {costoUnitarioIva:calcCostoIvaBottiglia(wine), servizio:_servizioSnap(dataMov), prezzoCartaSnap:parseFloat(wine.prezzoCarta)||0} : {})};
   movements = [newMov, ...movements];
 
   // 2. Aggiornamento ottimistico UI (solo il valore giacenza, senza re-render completo)
@@ -9231,6 +9218,7 @@ async function registraMovimentoMobile(wineId, delta){
   const tipo = delta > 0 ? "carico" : "scarico";
   const qty = Math.abs(delta);
   const dateStr = today();
+  const dataMov = tipo === "scarico" ? _dataServizioDefault() : dateStr;
   const fattura = `MOB-${dateStr}`;
 
   // Update wine in memory
@@ -9253,8 +9241,8 @@ async function registraMovimentoMobile(wineId, delta){
 
   const movId = uid();
   const newMov = {id:movId, wineId, wineName:wine.nome, produttore:wine.produttore,
-    tipo, qty, data:dateStr, fattura, fornitore:"", note:"[mobile]", ts:Date.now(),
-    ...(tipo==="scarico" ? {costoUnitarioIva:calcCostoIvaBottiglia(wine), servizio:parseFloat(CONFIG.servizioBottiglia)||0, prezzoCartaSnap:parseFloat(wine.prezzoCarta)||0} : {})};
+    tipo, qty, data:dataMov, fattura, fornitore:"", note:"[mobile]", ts:Date.now(),
+    ...(tipo==="scarico" ? {costoUnitarioIva:calcCostoIvaBottiglia(wine), servizio:_servizioSnap(dataMov), prezzoCartaSnap:parseFloat(wine.prezzoCarta)||0} : {})};
   movements = [newMov, ...movements];
 
   // Persistenza tramite il path sicuro condiviso `_flushSave`:
@@ -9527,10 +9515,10 @@ function _renderMobStorico(){
     .filter(m => !m.deleted && m.tipo === "scarico")
     .sort((a,b) => String(b.data||"").localeCompare(String(a.data||"")) || (b.ts||0)-(a.ts||0));
 
-  // Totale "serata" = bottiglie scaricate oggi
-  const oggi = today();
-  const totOggi = righe.filter(m => String(m.data||"").slice(0,10) === oggi).reduce((s,m) => s + (parseInt(m.qty)||0), 0);
-  if(totEl) totEl.textContent = `${totOggi} bt oggi`;
+  // Totale = bottiglie scaricate nella giornata di servizio corrente
+  const gs = _dataServizioDefault();
+  const totOggi = righe.filter(m => String(m.data||"").slice(0,10) === gs).reduce((s,m) => s + (parseInt(m.qty)||0), 0);
+  if(totEl) totEl.textContent = `${totOggi} bt · ${_labelGiornataServizio(gs)}`;
 
   _updateStoricoBadge();
 
@@ -11265,6 +11253,7 @@ function _tfShowManifesto(manifest){
   const b64=_b64EncodeUtf8(json);
   const tot=manifest.lines.reduce((s,l)=>s+(parseInt(l.qty)||0),0);
   const isScheda=manifest.mode==="scheda";
+  const isOrdine=manifest.type==="cantina-order";
   const fname=`trasferimento_${(NOME_LOCALE||"cantina").replace(/[^a-z0-9]+/gi,"-").toLowerCase()}_${String(manifest.transferId).slice(0,8)}.json`;
   document.getElementById("man-backdrop")?.remove();
   const bd=document.createElement("div");
@@ -11275,7 +11264,7 @@ function _tfShowManifesto(manifest){
       <div class="modal-header"><h2>✅ Manifesto pronto</h2>
         <button style="font-size:18px;color:var(--txt3)" onclick="document.getElementById('man-backdrop').remove()">✕</button></div>
       <div class="modal-body">
-        <div style="font-size:12px;color:var(--txt2);margin-bottom:10px">${manifest.lines.length} referenze · ${isScheda?"solo schede · nessuna bottiglia":tot+"bt"} → <b>${h(manifest.dest||"destinazione")}</b>. Consegna questo codice al locale ricevente (incolla in <b>Ricevi</b>) oppure scarica il file.</div>
+        <div style="font-size:12px;color:var(--txt2);margin-bottom:10px">${isOrdine?`🛒 Ordine <b>${h(manifest.ordine?.fornitore||"")}</b> · `:""}${manifest.lines.length} referenze · ${isScheda?"solo schede · nessuna bottiglia":tot+"bt"}${isOrdine?" da ordinare":""} → <b>${h(manifest.dest||"destinazione")}</b>. Consegna questo codice al locale ricevente (incolla in <b>Ricevi</b>) oppure scarica il file.</div>
         <div style="max-height:130px;overflow:auto;border:1px solid var(--border);margin-bottom:10px">${manifest.lines.map(l=>`<div style="padding:4px 8px;border-bottom:1px solid var(--border);font-size:11px">${isScheda?"📄":`${parseInt(l.qty)||0}bt`} · <b>${h(l.nome)}</b>${l.annata?" "+h(l.annata):""} — ${h(l.produttore||"")}</div>`).join("")}</div>
         <textarea id="man-b64" readonly class="form-input" style="width:100%;height:110px;font-family:monospace;font-size:10px;resize:vertical" onclick="this.select()">${b64}</textarea>
         <div style="font-size:10px;color:var(--txt4);margin-top:6px">transferId: ${h(manifest.transferId)}</div>
@@ -11297,6 +11286,65 @@ function _downloadManifesto(fname){
   setTimeout(()=>URL.revokeObjectURL(url),2000);
 }
 
+// ── MANIFESTO ORDINE ─────────────────────────────────────────────────────────
+// Passa un ORDINE COMPILATO da un locale all'altro (es. Aviner: Lagrandissima →
+// Palinurobar). Viaggia la sola testata + referenze: nessuna giacenza, nessun
+// lotto, nessun costo. Il ricevente ottiene un ordine "in attesa" identico, che
+// caricherà a magazzino con il normale flusso di ricezione.
+// Idempotente: l'import è bloccato se orders contiene già lo stesso transferId.
+var ORDER_MANIFEST_V = 1;
+function _ordManifestRef(r){
+  return {
+    produttore:(r.produttore||"").trim(), nomeVino:(r.nomeVino||"").trim(),
+    vitigni:r.vitigni||"", annata:(r.annata||"").trim(), tipologia:r.tipologia||"Rosso",
+    formato:parseFloat(r.formato)||0.75, nazione:(r.nazione||"Italia").trim(),
+    regione:(r.regione||"").trim(), zona:(r.zona||"").trim(),
+    prezzoAcq:parseFloat(r.prezzoAcq)||0, iva:parseInt(r.iva)||22,
+    prezzoCarta:parseFloat(r.prezzoCarta)||0, qty:parseInt(r.qty)||1,
+    scontoRef:parseFloat(r.scontoRef)||0
+  };
+}
+function inviaOrdineAdAltroLocale(id){
+  if(!CONFIG.trasferimenti){ notify("⚠️ Trasferimenti non attivi su questo locale","err"); return; }
+  const src=(orders||[]).find(o=>o.id===id) || (_bozzeSb||[]).find(b=>b.id===id);
+  if(!src){ notify("Ordine non trovato","err"); return; }
+  const refs=(src.referenze||(src.righe||[]).map(_refFromRigaSb)||[]).map(_ordManifestRef).filter(r=>r.nomeVino);
+  if(!refs.length){ notify("⚠️ Ordine senza referenze","err"); return; }
+  const dest=(prompt("Locale destinazione (es. Palinurobar):", "")||"").trim();
+  if(!dest) return;
+  const manifest={
+    v:ORDER_MANIFEST_V, type:"cantina-order", mode:"ordine", transferId:uid(),
+    from:NOME_LOCALE, fromDbUser:_effectiveDbUser(), dest, data:today(),
+    ordine:{ dataOrdine:src.dataOrdine||today(), fornitore:src.fornitore||src.distributore||"",
+             note:src.note||"", sconto:parseFloat(src.sconto)||0, referenze:refs },
+    // riepilogo per l'anteprima/modale, stesso formato dei manifesti referenza
+    lines:refs.map(r=>({nome:r.nomeVino,produttore:r.produttore,annata:r.annata,qty:r.qty}))
+  };
+  _tfShowManifesto(manifest);
+}
+function _ordImportaManifesto(man){
+  if((orders||[]).some(o=>o._importId===man.transferId)){ notify("⚠️ Ordine già importato","err"); return; }
+  const o=man.ordine||{};
+  const refs=(o.referenze||[]).filter(r=>r&&r.nomeVino).map(r=>{
+    const fmt=String(parseFloat(r.formato)||0.75);
+    // Aggancio alla referenza locale solo se nome + formato coincidono: senza
+    // match il wineId resta vuoto e la ricezione creerà la scheda.
+    const wineId=(wines.find(w=>(w.nome||"").toLowerCase()===String(r.nomeVino).toLowerCase()
+      && String(parseFloat(w.formato)||0.75)===fmt)||{}).id||"";
+    return {..._ordManifestRef(r), id:uid(), wineId};
+  });
+  if(!refs.length){ notify("⚠️ Manifesto ordine senza referenze","err"); return; }
+  orders.push({ id:uid(), fornitore:o.fornitore||"", dataOrdine:o.dataOrdine||today(),
+    note:[o.note,`importato da ${man.from||"altro locale"}`].filter(Boolean).join(" · "),
+    sconto:parseFloat(o.sconto)||0, referenze:refs, stato:"attesa",
+    _importId:man.transferId, _importFrom:man.from||"" });
+  scheduleSave();
+  try{ clearTimeout(saveTimer); _flushSave(); }catch{}
+  const ta=document.getElementById("tf-ricev"); if(ta) ta.value="";
+  notify(`🛒 Ordine importato da ${man.from||"altro locale"} — ${refs.length} referenze, in attesa`);
+  go("ordini");
+}
+
 // ── RICEZIONE ────────────────────────────────────────────────────────────────
 function _parseManifesto(raw){
   raw=(raw||"").trim(); if(!raw) return null;
@@ -11304,7 +11352,11 @@ function _parseManifesto(raw){
   try{ obj=JSON.parse(raw); }catch{
     try{ obj=JSON.parse(_b64DecodeUtf8(raw.replace(/\s+/g,""))); }catch{ return null; }
   }
-  if(!obj||obj.type!=="cantina-transfer"||!Array.isArray(obj.lines)||!obj.lines.length) return null;
+  if(!obj) return null;
+  // Manifesto ORDINE: stesso involucro, payload in obj.ordine. `lines` resta
+  // popolato (anteprima/riepilogo) così il resto della pipeline non cambia.
+  if(obj.type==="cantina-order") return (obj.ordine && Array.isArray(obj.lines)) ? obj : null;
+  if(obj.type!=="cantina-transfer"||!Array.isArray(obj.lines)||!obj.lines.length) return null;
   return obj;
 }
 function _tfRicevFile(ev){
@@ -11320,6 +11372,20 @@ function _tfRicevPreview(){
   const enable=b=>{ if(!btn)return; btn.disabled=!b; btn.style.opacity=b?"1":".4"; btn.style.pointerEvents=b?"auto":"none"; };
   const man=_parseManifesto(raw);
   if(!man){ if(el) el.innerHTML=raw.trim()?`<span style="color:#FF453A">Manifesto non valido o illeggibile</span>`:""; enable(false); return; }
+  if(man.type==="cantina-order"){
+    const o=man.ordine||{};
+    const dup=(orders||[]).some(x=>x._importId===man.transferId);
+    const self=man.fromDbUser && man.fromDbUser===_effectiveDbUser();
+    const tot=(o.referenze||[]).reduce((s2,r)=>s2+(parseInt(r.qty)||0),0);
+    const rows=(o.referenze||[]).map(r=>`<div style="padding:4px 0;border-bottom:1px solid var(--border)">${parseInt(r.qty)||0}bt · <b>${h(r.nomeVino||"?")}</b>${r.annata?" "+h(r.annata):""} — ${h(r.produttore||"")}</div>`).join("");
+    if(el) el.innerHTML=`
+      <div style="margin-bottom:8px">🛒 <b>Ordine</b> da <b>${h(man.from||"?")}</b> · fornitore <b>${h(o.fornitore||"—")}</b> · ${h(_fmtDataIT(o.dataOrdine||man.data||""))} · ${(o.referenze||[]).length} referenze · ${tot}bt${o.sconto?` · sconto ${o.sconto}%`:""}</div>
+      ${rows}
+      <div style="margin-top:8px;font-size:11px;color:var(--txt4)">Verrà creato un ordine <b>in attesa</b>. Nessuna giacenza e nessun costo finché non confermi l'arrivo.</div>
+      ${dup?`<div style="margin-top:10px;color:#fb923c">⚠️ Ordine già importato (transferId ${h(String(man.transferId).slice(0,8))})</div>`:""}
+      ${self?`<div style="margin-top:10px;color:#FF453A">⚠️ Manifesto generato da questa stessa cantina</div>`:""}`;
+    enable(!dup && !self); return;
+  }
   if(man.mode==="scheda"){
     const self=man.fromDbUser && man.fromDbUser===_effectiveDbUser();
     const rows=man.lines.map(l=>{
@@ -11353,6 +11419,7 @@ function _tfConfermaRicevi(){
   const man=_parseManifesto(raw);
   if(!man){ notify("⚠️ Manifesto non valido","err"); return; }
   if(man.fromDbUser && man.fromDbUser===_effectiveDbUser()){ notify("⚠️ Manifesto emesso da questa stessa cantina","err"); return; }
+  if(man.type==="cantina-order"){ _ordImportaManifesto(man); return; }
   if(movements.some(m=>m.tipo==="trasferimento-entrata"&&m.transferId===man.transferId)){
     notify("⚠️ Trasferimento già ricevuto","err"); return;
   }
@@ -11460,11 +11527,18 @@ function _tfExportStoricoCSV(){
 
 // Registrazione voce di menu + titolo sezione: la differenza tra i tre locali
 // resta interamente in CONFIG.trasferimenti, manager.js è identico ovunque.
-(function _tfInstallNav(){
-  if(!CONFIG.trasferimenti) return;
+// La vecchia versione era un IIFE one-shot su #sidebar-nav: se manager.js
+// veniva eseguito prima che la sidebar esistesse (o se l'host HTML usava un
+// contenitore con id diverso) la voce non veniva MAI installata e la sezione
+// diventava irraggiungibile. Ora: ricerca su piu' selettori + ritentativi.
+function _tfInstallNav(){
+  if(!CONFIG.trasferimenti) return true;
   SECTION_TITLES.trasferimenti="🔄 Trasferimenti";
-  const nav=document.getElementById("sidebar-nav");
-  if(!nav || nav.querySelector('[data-section="trasferimenti"]')) return;
+  const nav=document.getElementById("sidebar-nav")
+    || document.querySelector('.sidebar-nav, #sidebar nav, nav.sidebar, #sidebar')
+    || (document.querySelector('.nav-btn')||{}).parentNode;
+  if(!nav) return false;
+  if(nav.querySelector('[data-section="trasferimenti"]')) return true;
   const btn=document.createElement("button");
   btn.className="nav-btn";
   btn.setAttribute("data-section","trasferimenti");
@@ -11472,7 +11546,16 @@ function _tfExportStoricoCSV(){
   btn.setAttribute("onclick","go('trasferimenti')");
   btn.innerHTML='<span class="nav-icon">🔄</span><span class="nav-btn-label"> Trasferimenti</span>';
   const ref=nav.querySelector('[data-section="export"]');
-  if(ref) nav.insertBefore(btn,ref); else nav.appendChild(btn);
+  if(ref) ref.parentNode.insertBefore(btn,ref); else nav.appendChild(btn);
+  return true;
+}
+(function _tfInstallNavRetry(){
+  if(typeof document==="undefined") return;
+  let n=0;
+  const go=()=>{ if(_tfInstallNav()||++n>20) return; setTimeout(go,300); };
+  if(document.readyState==="loading") document.addEventListener("DOMContentLoaded",go,{once:true});
+  else go();
+  window.addEventListener("load",()=>_tfInstallNav(),{once:true});
 })();
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -12380,3 +12463,92 @@ function _acInit(root){
     window.addEventListener("resize",()=>_acPos());
   }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MODALI A TUTTA LARGHEZZA (composizione ordine / ricezione ordine)
+// Griglia a layout fisso: tutte le colonne visibili senza scroll orizzontale.
+(function(){
+  if(typeof document==="undefined"||document.getElementById("cm-modal-xl-css")) return;
+  const st=document.createElement("style"); st.id="cm-modal-xl-css";
+  st.textContent=`
+.cm-modal-xl{width:98vw!important;max-width:1900px!important;max-height:94vh!important;
+  display:flex!important;flex-direction:column!important}
+.cm-modal-xl>.modal-header,.cm-modal-xl>.modal-footer{flex:0 0 auto}
+.cm-modal-xl>.modal-body{flex:1 1 auto;overflow-y:auto;overflow-x:hidden;max-height:none}
+.cm-grid-wrap{overflow-x:auto;overflow-y:visible}
+.cm-grid-tbl{width:100%;border-collapse:collapse;table-layout:fixed;min-width:1080px}
+.cm-grid-tbl td{padding:4px 4px!important;vertical-align:middle;font-size:11px;
+  overflow-wrap:anywhere;word-break:break-word}
+.cm-grid-tbl .cm-col-hidden{width:0;padding:0!important;overflow:hidden;max-width:0}
+.cm-grid-tbl tr.cm-grid-head td{position:sticky;top:0;z-index:3;background:var(--bg2,#1c1917);
+  font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--txt4);
+  padding:7px 4px!important;border-bottom:1px solid var(--border);white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis}
+.cm-grid-tbl .form-input{width:100%!important;min-width:0!important;max-width:100%!important;
+  box-sizing:border-box;font-size:11px;padding-left:5px;padding-right:5px}
+.cm-grid-tbl select.form-input{padding-right:2px;text-overflow:ellipsis}
+.cm-grid-tbl input.cm-ric-short{border-color:rgba(255,159,10,.55)!important;color:var(--amber)!important}
+@media(max-width:1024px){
+  .cm-modal-xl{width:100vw!important;max-width:100vw!important;max-height:100vh!important}
+  .cm-grid-tbl{min-width:940px}
+}`;
+  (document.head||document.documentElement).appendChild(st);
+})();
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BONIFICA DATE SCARICHI (console) — riallinea gli scarichi storici alla
+// giornata di servizio. Dry-run di default.
+//   window.__cmFixDateScarichi()                  → report, nessuna scrittura
+//   window.__cmFixDateScarichi({apply:true})      → applica + backup + flush
+//   window.__cmFixDateScarichi({tutti:true})      → include anche gli scarichi
+//                                                    non mobile (form/serata)
+//   window.__cmFixDateScarichi({da:"2026-07-01"}) → limita il periodo
+(function(){
+  function _isMobileMov(m){
+    return String(m.note||"").includes("[mobile]") || String(m.fattura||"").startsWith("MOB-");
+  }
+  window.__cmFixDateScarichi = function(opts){
+    opts=opts||{};
+    const apply=!!opts.apply, tutti=!!opts.tutti;
+    const da=opts.da?String(opts.da).slice(0,10):"", a=opts.a?String(opts.a).slice(0,10):"";
+    const report=[], targets=[];
+    (movements||[]).forEach(m=>{
+      if(m.deleted || m.tipo!=="scarico") return;
+      if(!tutti && !_isMobileMov(m)) return;
+      const d=String(m.data||"").slice(0,10);
+      if(!d) return;
+      if(da && d<da) return;
+      if(a && d>a) return;
+      if(!m.ts) return;                                  // senza ts non so quando fu registrato
+      const reg=_isoD(new Date(m.ts));                   // giorno di REGISTRAZIONE
+      if(d!==reg) return;                                // data gia' diversa → gia' attribuita a mano
+      const nuova=_dataServizioDefault(new Date(m.ts)); // stessa regola dei nuovi scarichi
+      if(nuova===d) return;                             // gia' corretto (turno diurno, ecc.)
+      const apertoDopo=(new Set(CONFIG.giorniApertura||[0,1,2,3,4,5,6])).has(_parseD(nuova).getDay()) && !_isChiuso(nuova);
+      void apertoDopo;
+      report.push({vino:m.wineName||"—", qty:m.qty, da:d, a:nuova,
+        origine:_isMobileMov(m)?"mobile":"altro", avviso:apertoDopo?"":"⚠️ giorno chiuso/non di apertura"});
+      targets.push({m, nuova});
+    });
+    console.table(report);
+    console.log(`${apply?"APPLICO":"DRY-RUN"} — ${targets.length} scarichi da spostare alla serata precedente.`);
+    if(!apply || !targets.length) return report;
+    try{
+      const ts=new Date().toISOString().replace(/[:.]/g,"-");
+      localStorage.setItem(_lsKey("movements_backup_"+ts), JSON.stringify(movements));
+      console.log("💾 backup salvato:", _lsKey("movements_backup_"+ts));
+    }catch(e){ console.warn("backup fallito", e); }
+    targets.forEach(({m,nuova})=>{
+      m.data=nuova;
+      // Lo snapshot servizio segue la nuova data: se scivola prima di
+      // CONFIG.servizioDal il servizio al banco non va conteggiato.
+      if(m.servizio!=null && CONFIG.servizioDal && nuova<CONFIG.servizioDal) m.servizio=0;
+      m.noteBonifica=(m.noteBonifica||"")+`|dataServizio→${nuova}`;
+    });
+    movements=[...movements];
+    try{ scheduleSave(); if(typeof saveTimer!=="undefined") clearTimeout(saveTimer); _flushSave(); }
+    catch(e){ console.warn("flush fallito", e); }
+    console.log("✅ date riallineate + flush. Ricarica la pagina per aggiornare i KPI.");
+    return report;
+  };
+})();

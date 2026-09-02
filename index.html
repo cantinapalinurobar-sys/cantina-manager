@@ -585,7 +585,28 @@ td[ondblclick]:hover{background:rgba(255,159,10,.06)!important}
     // A caricamento concluso: svuotare la stringa o spostare la data in avanti.
     caricoInizialeFino:  "2026-07-31",
     giorniApertura:      [1,2,3,4,5,6],
-    serviziGiorno:       {}
+    serviziGiorno:       {},
+
+    // ── COMPETENZA DELLO SCARICO (giornata di servizio) ────────────────────
+    // Uno scarico registrato oggi si riferisce di norma alla SERATA PRECEDENTE:
+    // il conteggio si fa a locale chiuso, il giorno dopo. Il ricavo segue la
+    // competenza, non il momento della digitazione.
+    //  · turniDiurni: giorni con servizio di PRANZO, in cui lo scarico compete
+    //    al giorno stesso (0=domenica … 6=sabato). Qui vuoto: la domenica e'
+    //    chiusa e negli altri giorni lo scarico si fa il mattino dopo.
+    //  · oraStacco: prima di quest'ora si sta ancora chiudendo la serata in
+    //    corso, quindi lo scarico compete al giorno precedente.
+    // Se a Palinurobar lo scarico si fa a fine serata PRIMA di mezzanotte,
+    // sostituire le due righe con:  attribuzioneSerataPrec: false
+    turniDiurni:         [],
+    oraStacco:           5,
+
+    // Chiusure straordinarie: giorni non lavorati, esclusi dal conteggio dei
+    // servizi e saltati nell'attribuzione dello scarico.
+    // Formato: { da: "2026-08-08", a: "2026-08-24", nota: "Ferie" }
+    chiusure: [
+      { da: "2026-08-09", a: "2026-08-24", nota: "Chiusura estiva" }
+    ]
   };
 </script>
 <script src="manager.js"></script>
