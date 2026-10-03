@@ -4,9 +4,11 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>Cantina Manager — Palinurobar</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@300;400;500;600&family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400;1,500&display=swap" rel="stylesheet">
+<link rel="icon" type="image/png" href="assets/favicon.png">
+<link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
+<meta name="theme-color" content="#0A0806">
+<link rel="preload" as="font" type="font/woff2" href="assets/venezia-bold.woff2" crossorigin>
+<link rel="preload" as="image" href="assets/logo-palinurobar.png">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
@@ -392,10 +394,54 @@ td[ondblclick]:hover{background:rgba(var(--amber-rgb,255,159,10),.06)!important}
 <body>
 
 <!-- LOGIN -->
+
+<!-- ══ PALINUROBAR THEME · palette e tipografia della carta (Venezia monotipo) ══ -->
+<style id="pb-theme">
+/* Venezia esiste solo in bold: viene mappata anche sui nomi Montserrat e
+   Cormorant Garamond, cosi' gli stili inline di manager.js la ereditano
+   senza toccare il codice condiviso. */
+@font-face{font-family:'Venezia';src:url(assets/venezia-bold.woff2) format('woff2');font-weight:100 900;font-style:normal;font-display:swap}
+@font-face{font-family:'Montserrat';src:url(assets/venezia-bold.woff2) format('woff2');font-weight:100 900;font-style:normal;font-display:swap}
+@font-face{font-family:'Cormorant Garamond';src:url(assets/venezia-bold.woff2) format('woff2');font-weight:100 900;font-style:normal;font-display:swap}
+:root{
+--bg:#0A0806;--bg2:#140F0A;--bg3:#1F1811;--border:#2A2118;--border2:#3A2E22;
+--txt:#F2E6D0;--txt1:#F2E6D0;--txt2:#E6D9C0;--txt3:#A8997F;--txt4:#6F6352;
+--amber:#F2E6D0;--amber2:#E4D3B4;--amber3:#BFA887;--amber4:#3A2E22;
+--amber-rgb:242,230,208;--amber3-rgb:191,168,135;
+--amber-glow:0 0 0 3px rgba(242,230,208,.16);
+--glass:rgba(20,15,10,.9);--glass-border:rgba(242,230,208,.07);
+--font-sans:'Venezia','Helvetica Neue',Helvetica,Arial,sans-serif;
+--font-serif:'Venezia','Helvetica Neue',Helvetica,Arial,sans-serif;
+}
+html,body{font-synthesis:none}
+body{background:var(--bg);font-variant-numeric:tabular-nums;-webkit-font-smoothing:antialiased}
+body i,body em,.ss-label,.sidebar-logo p,.section-label em{font-style:normal}
+::selection{background:rgba(242,230,208,.28);color:#fff}
+.btn-primary{color:#0A0806}
+select,option,input,textarea,button{font-family:var(--font-sans)}
+.brand-mark{height:1.5em;width:auto;display:inline-block;vertical-align:middle;flex-shrink:0}
+#sidebar .sidebar-logo h1 .brand-mark{height:26px}
+.login-logo-icon{width:132px;height:132px;background:none!important;border:none!important;box-shadow:none!important;border-radius:0}
+.login-logo-icon img{width:100%;height:auto;filter:drop-shadow(0 0 18px rgba(242,230,208,.25))}
+.login-bg{background-image:radial-gradient(ellipse 80% 60% at 50% 0%,rgba(242,230,208,.06) 0%,transparent 70%)!important}
+
+/* ── LOADER: logo al centro, accensione da insegna al neon ── */
+#pb-loader{position:fixed;inset:0;z-index:10000;background:#0A0806;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:26px;transition:opacity .6s ease,visibility .6s}
+#pb-loader.out{opacity:0;visibility:hidden;pointer-events:none}
+#pb-loader .pb-l-logo{width:min(46vw,220px);aspect-ratio:1;background:url(assets/logo-palinurobar.png) center/contain no-repeat;animation:pbFlicker 1.6s ease-out both,pbGlow 2.6s ease-in-out 1.6s infinite}
+#pb-loader .pb-l-bar{width:min(40vw,160px);height:2px;background:rgba(242,230,208,.12);border-radius:2px;overflow:hidden;position:relative}
+#pb-loader .pb-l-bar::after{content:"";position:absolute;inset:0;width:40%;background:#F2E6D0;border-radius:2px;animation:pbSlide 1.3s cubic-bezier(.65,0,.35,1) infinite}
+#pb-loader .pb-l-txt{font-family:'Venezia',sans-serif;font-size:10px;letter-spacing:.32em;text-transform:uppercase;color:rgba(242,230,208,.5)}
+@keyframes pbFlicker{0%{opacity:0;filter:none}8%{opacity:.85}12%{opacity:.1}20%{opacity:.9}24%{opacity:.25}34%{opacity:1}40%{opacity:.55}52%,100%{opacity:1;filter:drop-shadow(0 0 14px rgba(242,230,208,.45))}}
+@keyframes pbGlow{0%,100%{filter:drop-shadow(0 0 10px rgba(242,230,208,.30))}50%{filter:drop-shadow(0 0 26px rgba(242,230,208,.60))}}
+@keyframes pbSlide{0%{transform:translateX(-100%)}100%{transform:translateX(250%)}}
+@media (prefers-reduced-motion:reduce){#pb-loader .pb-l-logo{animation:none;filter:drop-shadow(0 0 14px rgba(242,230,208,.4))}#pb-loader .pb-l-bar::after{animation-duration:2.6s}}
+</style>
+<div id="pb-loader" role="status" aria-live="polite"><div class="pb-l-logo" aria-label="Palinurobar"></div><div class="pb-l-bar"></div><div class="pb-l-txt">Caricamento cantina</div></div>
 <div id="login-screen" class="login-bg">
   <div class="login-box">
     <div class="login-logo">
-      <div class="login-logo-icon">🍷</div>
+      <div class="login-logo-icon"><img src="assets/logo-palinurobar.png" alt="Palinurobar"></div>
       <h1>Cantina Manager</h1>
       <p>Gestione Professionale</p>
     </div>
@@ -423,7 +469,7 @@ td[ondblclick]:hover{background:rgba(var(--amber-rgb,255,159,10),.06)!important}
   <!-- SIDEBAR -->
   <div id="sidebar">
     <div class="sidebar-logo">
-      <h1>🍷 <span class="nav-btn-label">Cantina</span></h1>
+      <h1><img class="brand-mark" src="assets/logo-palinurobar.png" alt=""> <span class="nav-btn-label">Cantina</span></h1>
       <p class="nav-btn-label">Palinurobar</p>
     </div>
     <nav id="sidebar-nav">
@@ -506,7 +552,7 @@ td[ondblclick]:hover{background:rgba(var(--amber-rgb,255,159,10),.06)!important}
 <div id="mob-screen">
   <div id="mob-topbar">
     <div id="mob-topbar-row1">
-      <h2>🍷 Inventario Rapido</h2>
+      <h2 style="display:flex;align-items:center;gap:8px"><img class="brand-mark" src="assets/logo-palinurobar.png" alt=""> Inventario Rapido</h2>
       <div style="display:flex;align-items:center;gap:8px">
         <div id="mob-db-status"><span class="db-dot off" id="mob-db-dot"></span><span id="mob-db-label">DB</span></div>
         <button id="mob-exit-btn" onclick="exitMobileMode()">↗ Desktop</button>
@@ -610,6 +656,29 @@ td[ondblclick]:hover{background:rgba(var(--amber-rgb,255,159,10),.06)!important}
   };
 </script>
 <script src="manager.js?v=20261003a"></script>
+<script>
+/* Loader Palinurobar: resta su finche' il DB non esce da "sync" (o compare il
+   login); riappare dopo l'accesso durante il caricamento dati. Max 9 s. */
+(function(){
+  var L=document.getElementById("pb-loader"); if(!L) return;
+  var t0=Date.now(), MIN=1300, hideT=null, maxT=null;
+  function vis(id){var e=document.getElementById(id);return !!e&&getComputedStyle(e).display!=="none"&&!e.classList.contains("hidden");}
+  function syncing(){var d=document.getElementById("db-dot"),m=document.getElementById("mob-db-dot");return (d&&d.classList.contains("sync"))||(m&&m.classList.contains("sync"));}
+  function hide(){clearTimeout(hideT);hideT=setTimeout(function(){L.classList.add("out");clearTimeout(maxT);},Math.max(0,MIN-(Date.now()-t0)));}
+  function show(){t0=Date.now();L.classList.remove("out");clearTimeout(maxT);maxT=setTimeout(hide,9000);}
+  function check(){ if(L.classList.contains("out")) return;
+    if(vis("login-screen")) return hide();
+    if(!syncing() && (vis("app")||vis("mob-screen")) && seenSync) return hide(); }
+  var seenSync=false;
+  new MutationObserver(function(){ if(syncing()) seenSync=true; check(); })
+    .observe(document.body,{subtree:true,attributes:true,attributeFilter:["class","style"]});
+  var ls=document.getElementById("login-screen");
+  if(ls) new MutationObserver(function(){ if(getComputedStyle(ls).display==="none" && L.classList.contains("out")){ seenSync=false; show(); } })
+    .observe(ls,{attributes:true,attributeFilter:["style","class"]});
+  maxT=setTimeout(hide,9000);
+  window.addEventListener("load",function(){ setTimeout(function(){ if(!syncing()) seenSync=true; check(); },400); });
+})();
+</script>
 
 <!-- NOTE VELOCE MODAL -->
 <div class="modal-backdrop hidden" id="note-veloce-backdrop" onclick="closeNoteVeloce(event)">
